@@ -1,3 +1,4 @@
+# Customer subscription activation, renewal order generation, and cancellation
 from __future__ import annotations
 
 from datetime import timedelta
