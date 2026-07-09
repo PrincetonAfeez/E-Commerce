@@ -1,3 +1,5 @@
+"""URLS config for config project"""
+
 import os
 
 from django.conf import settings
