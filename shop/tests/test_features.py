@@ -1,3 +1,4 @@
+# Tests storefront features: email, webhooks, credit, SEO, B2B pricing, and subscriptions
 from __future__ import annotations
 
 import uuid
