@@ -1,3 +1,4 @@
+# Django AppConfig registering the shop application
 from django.apps import AppConfig
 
 
