@@ -1,3 +1,4 @@
+# Expires active inventory reservations for non-payment checkout attempts
 from django.core.management.base import BaseCommand
 
 from shop.services.inventory import expire_reservations
