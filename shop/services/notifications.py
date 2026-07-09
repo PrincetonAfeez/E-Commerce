@@ -1,3 +1,4 @@
+# Transactional email rendering and delivery logged via EmailDelivery records
 from __future__ import annotations
 
 import hashlib
