@@ -1,3 +1,4 @@
+# Tests multi-tenant isolation, staff scoping, signup, billing, and cross-store access
 from __future__ import annotations
 
 from decimal import Decimal
