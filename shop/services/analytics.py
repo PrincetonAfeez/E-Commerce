@@ -1,3 +1,4 @@
+# Staff dashboard metrics: revenue, AOV, daily series, email and outbox health
 from __future__ import annotations
 
 from datetime import timedelta
