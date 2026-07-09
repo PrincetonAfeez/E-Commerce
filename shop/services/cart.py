@@ -1,3 +1,4 @@
+# Cart lifecycle: get/create, add/update items, coupons, and total recalculation
 from __future__ import annotations
 
 from dataclasses import dataclass
