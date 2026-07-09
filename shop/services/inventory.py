@@ -1,3 +1,4 @@
+# Stock availability, reservations, consumption, expiry, and manual adjustments
 from __future__ import annotations
 
 from django.db import transaction
