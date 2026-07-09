@@ -1,3 +1,4 @@
+# Order fulfillment transitions, cancellation, and status event outbox publishing
 from __future__ import annotations
 
 from django.db import transaction
