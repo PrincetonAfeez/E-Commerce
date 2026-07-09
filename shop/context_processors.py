@@ -1,3 +1,4 @@
+# Injects store branding settings and tenant-staff flag into every template
 from __future__ import annotations
 
 from .models import StoreSettings, TenantMembership
