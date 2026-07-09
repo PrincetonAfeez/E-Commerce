@@ -1,3 +1,4 @@
+# Pytest fixtures clearing cache and tenant context between tests
 import pytest
 from django.core.cache import cache
 
