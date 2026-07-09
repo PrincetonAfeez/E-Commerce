@@ -1,3 +1,4 @@
+# Deletes expired idempotency records and stale carts or checkout attempts
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
