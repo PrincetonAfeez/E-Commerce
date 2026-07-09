@@ -1,3 +1,4 @@
+# Typed CommerceError hierarchy for cart, checkout, payment, and plan limit failures
 class CommerceError(Exception):
     code = "commerce_error"
 
