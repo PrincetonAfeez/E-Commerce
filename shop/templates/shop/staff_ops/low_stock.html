@@ -1,0 +1,18 @@
+{% extends "shop/base.html" %}
+{% block title %}Low stock · Aster Commerce{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div><h1>Low stock report</h1><p>Variants at or below their reorder point</p></div>
+  <a class="button secondary" href="{% url 'staff_ops:dashboard' %}">Dashboard</a>
+</section>
+<table class="data-table">
+  <thead><tr><th>SKU</th><th>Product</th><th>Available</th><th>On hand</th><th>Reorder point</th></tr></thead>
+  <tbody>
+    {% for v in low_stock %}
+      <tr><td>{{ v.sku }}</td><td>{{ v.product.name }}</td><td>{{ v.available }}</td><td>{{ v.quantity }}</td><td>{{ v.reorder_point }}</td></tr>
+    {% empty %}
+      <tr><td colspan="5" class="empty">Everything is well stocked.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

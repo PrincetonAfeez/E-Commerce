@@ -1,0 +1,25 @@
+{% extends "shop/base.html" %}
+{% block title %}Return order {{ order.order_number }} · Aster Commerce{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <form class="form-panel" method="post">
+    {% csrf_token %}
+    <h1>Request a return</h1>
+    <p>Order {{ order.order_number }} — choose the items and quantities to return.</p>
+    <table class="data-table">
+      <thead><tr><th>Item</th><th>Ordered</th><th>Return qty</th></tr></thead>
+      <tbody>
+        {% for item in order.items.all %}
+          <tr>
+            <td>{{ item.product_name }} <small>({{ item.sku }})</small></td>
+            <td>{{ item.quantity }}</td>
+            <td><input class="qty" type="number" name="qty_{{ item.pk }}" min="0" max="{{ item.quantity }}" value="0"></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <label>Reason <textarea name="reason"></textarea></label>
+    <button class="button" type="submit">Submit return</button>
+  </form>
+</section>
+{% endblock %}

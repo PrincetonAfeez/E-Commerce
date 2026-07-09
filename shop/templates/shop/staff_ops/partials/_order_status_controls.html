@@ -1,0 +1,23 @@
+<section>
+  <h2>Fulfillment</h2>
+  <form class="stack" method="post" action="{% url 'staff_ops:transition' order.pk %}">
+    {% csrf_token %}
+    <label>Status
+      <select name="target_status">
+        <option value="processing">Processing</option>
+        <option value="shipped">Shipped</option>
+        <option value="delivered">Delivered</option>
+      </select>
+    </label>
+    <label>Carrier <input type="text" name="carrier" value="{{ order.fulfillment.carrier }}"></label>
+    <label>Tracking <input type="text" name="tracking_number" value="{{ order.fulfillment.tracking_number }}"></label>
+    <label>Note <textarea name="note"></textarea></label>
+    <button class="button" type="submit">Update fulfillment</button>
+  </form>
+  <form class="stack" method="post" action="{% url 'staff_ops:cancel' order.pk %}">
+    {% csrf_token %}
+    <label>Cancel note <input type="text" name="note"></label>
+    <label class="check"><input type="checkbox" name="restock"> Restock items on cancel</label>
+    <button class="button danger" type="submit">Cancel order</button>
+  </form>
+</section>

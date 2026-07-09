@@ -1,0 +1,40 @@
+{% extends "shop/base.html" %}
+{% block title %}Payment · Aster Commerce{% endblock %}
+{% block content %}
+<section class="checkout-layout">
+  <form class="form-panel" method="post">
+    {% csrf_token %}
+    <input type="hidden" name="payment_idempotency_key" value="{{ payment_idempotency_key }}">
+    <input type="hidden" name="confirmation_idempotency_key" value="{{ confirmation_idempotency_key }}">
+    <h1>Payment</h1>
+    {% if attempt.price_drift_message %}<p class="notice">{{ attempt.price_drift_message }}</p>{% endif %}
+    <label>Card
+      <select name="card_token">
+        <option value="tok_visa">Visa ending 4242</option>
+        {% if gateway_test_modes %}<option value="tok_decline">Declined card</option>{% endif %}
+      </select>
+    </label>
+    <input type="hidden" name="authorize_mode" value="approve">
+    <input type="hidden" name="confirm_mode" value="approve">
+    <button class="button" type="submit">Pay ${{ attempt.total }}</button>
+  </form>
+  <aside class="summary-panel">
+    <h2>Reserved</h2>
+    <div class="line-list">
+      {% for line in attempt.line_snapshots.all %}
+        <div class="line-item compact">
+          <div><strong>{{ line.product_name }}</strong><span>{{ line.sku }}</span></div>
+          <span>{{ line.quantity }} × ${{ line.unit_price }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <dl class="totals">
+      <div><dt>Subtotal</dt><dd>${{ attempt.subtotal }}</dd></div>
+      <div><dt>Discount</dt><dd>-${{ attempt.discount_total }}</dd></div>
+      <div><dt>Shipping</dt><dd>${{ attempt.shipping_total }}</dd></div>
+      <div><dt>Tax</dt><dd>${{ attempt.tax_total }}</dd></div>
+      <div class="total"><dt>Total</dt><dd>${{ attempt.total }}</dd></div>
+    </dl>
+  </aside>
+</section>
+{% endblock %}

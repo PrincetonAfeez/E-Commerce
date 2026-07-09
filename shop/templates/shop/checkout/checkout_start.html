@@ -1,0 +1,34 @@
+{% extends "shop/base.html" %}
+{% block title %}Checkout · Aster Commerce{% endblock %}
+{% block content %}
+<section class="checkout-layout">
+  <form class="form-panel" method="post">
+    {% csrf_token %}
+    <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+    <input type="hidden" name="expected_subtotal" value="{{ totals.subtotal }}">
+    <h1>Checkout</h1>
+    {% if default_address %}<p class="notice">Prefilled from your default address.</p>{% endif %}
+    <div class="field-grid">
+      <label>Email <input type="email" name="email" value="{{ request.user.email }}" required></label>
+      <label>Name <input type="text" name="name" value="{{ default_address.name }}" required></label>
+      <label>Address <input type="text" name="address1" value="{{ default_address.address1 }}" required></label>
+      <label>Apt / suite <input type="text" name="address2" value="{{ default_address.address2 }}"></label>
+      <label>City <input type="text" name="city" value="{{ default_address.city }}" required></label>
+      <label>State <input type="text" name="region" value="{{ default_address.region }}" required></label>
+      <label>ZIP <input type="text" name="postal_code" value="{{ default_address.postal_code }}" required></label>
+      <label>Country <input type="text" name="country" value="{{ default_address.country|default:'US' }}" maxlength="2"></label>
+      <label>Shipping
+        <select name="shipping_method">
+          <option>Standard</option>
+          <option>Express</option>
+        </select>
+      </label>
+    </div>
+    {% if store_credit and store_credit > 0 %}
+      <label class="check"><input type="checkbox" name="use_store_credit"> Apply store credit (${{ store_credit }} available)</label>
+    {% endif %}
+    <button class="button" type="submit">Reserve stock</button>
+  </form>
+  {% include "shop/checkout/partials/_checkout_summary.html" %}
+</section>
+{% endblock %}

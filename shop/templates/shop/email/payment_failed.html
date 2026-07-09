@@ -1,0 +1,6 @@
+{% extends "shop/email/base_email.html" %}
+{% block content %}
+  <p>We couldn't process your payment{% if payload.failure_code %} ({{ payload.failure_code }}){% endif %}.</p>
+  <p>Your items were released. You can try checking out again from your cart.</p>
+  <p><a href="{{ site_url }}/cart/">Return to your cart</a></p>
+{% endblock %}

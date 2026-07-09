@@ -1,0 +1,7 @@
+{% if variant.on_sale %}
+  <span class="price sale">${{ variant.price }}</span>
+  <s class="price-compare">${{ variant.compare_at_price }}</s>
+  <span class="badge-sale">-{{ variant.discount_percent }}%</span>
+{% else %}
+  <span class="price">${{ variant.price }}</span>
+{% endif %}

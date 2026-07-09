@@ -1,0 +1,45 @@
+{% extends "shop/base.html" %}
+{% block title %}Team · {{ store.store_name }}{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div><h1>Team</h1><p>Manage who can operate this store</p></div>
+  <a class="button secondary" href="{% url 'staff_ops:dashboard' %}">Dashboard</a>
+</section>
+
+<section class="account-layout">
+  <div>
+    <table class="data-table">
+      <thead><tr><th>Member</th><th>Role</th><th></th></tr></thead>
+      <tbody>
+        {% for m in members %}
+          <tr>
+            <td>{{ m.user.email|default:m.user.username }}</td>
+            <td>{{ m.get_role_display }}</td>
+            <td>
+              {% if m.role != "owner" %}
+                <form class="inline-form" method="post" action="{% url 'staff_ops:team_remove' m.pk %}">
+                  {% csrf_token %}<button class="link-button" type="submit">Remove</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <aside class="form-panel">
+    <h2>Invite a teammate</h2>
+    <form method="post" action="{% url 'staff_ops:team_invite' %}">
+      {% csrf_token %}
+      <label>Email <input type="email" name="email" required></label>
+      <label>Role
+        <select name="role">
+          <option value="staff">Staff</option>
+          <option value="manager">Manager</option>
+        </select>
+      </label>
+      <button class="button" type="submit">Send invite</button>
+    </form>
+  </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "shop/base.html" %}
+{% block title %}Terms of Service · {{ store.store_name }}{% endblock %}
+{% block content %}
+<article class="legal-page">
+  <h1>Terms of Service</h1>
+  <p><em>Last updated {{ updated }}.</em></p>
+
+  <h2>1. Agreement</h2>
+  <p>By creating an account or store, or by placing an order, you agree to these Terms.
+     If you are using the service on behalf of an organization, you accept these Terms
+     for that organization.</p>
+
+  <h2>2. Accounts</h2>
+  <p>You are responsible for the activity under your account and for keeping your
+     credentials secure. Store operators are responsible for the products they list,
+     the orders they fulfil, and compliance with laws applicable to their business.</p>
+
+  <h2>3. Payments</h2>
+  <p>Storefront checkout and platform billing on this deployment are processed by a
+     <strong>simulated payment gateway</strong> for demonstration purposes. No real card
+     is charged and no real funds move. Do not enter live card numbers.</p>
+
+  <h2>4. Acceptable use</h2>
+  <p>You may not use the service to break the law, infringe others' rights, send spam,
+     or attempt to disrupt or gain unauthorized access to the platform or other tenants.</p>
+
+  <h2>5. Data</h2>
+  <p>Our handling of personal data is described in the <a href="{% url 'privacy' %}">Privacy Policy</a>,
+     which forms part of these Terms.</p>
+
+  <h2>6. Termination</h2>
+  <p>You may close your account at any time from your account settings. We may suspend or
+     terminate access for breach of these Terms or to protect the platform.</p>
+
+  <h2>7. Disclaimer &amp; liability</h2>
+  <p>The service is provided "as is" without warranties. To the extent permitted by law,
+     we are not liable for indirect or consequential losses.</p>
+
+  <h2>8. Changes</h2>
+  <p>We may update these Terms; material changes will be posted here with a revised date.</p>
+</article>
+{% endblock %}

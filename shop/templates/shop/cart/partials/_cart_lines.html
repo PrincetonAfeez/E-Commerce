@@ -1,0 +1,20 @@
+<div class="line-list">
+  {% for item in cart.items.all %}
+    <div class="line-item">
+      <div>
+        <strong>{{ item.variant.product.name }}</strong>
+        <span>{{ item.variant.display_name }} · {{ item.variant.sku }}</span>
+      </div>
+      <form method="post" action="{% url 'cart:update' %}" hx-post="{% url 'cart:update' %}" hx-target="#cart-panel" hx-swap="outerHTML">
+        {% csrf_token %}
+        <input type="hidden" name="variant_id" value="{{ item.variant.id }}">
+        <input class="qty" type="number" name="quantity" value="{{ item.quantity }}" min="0" aria-label="Quantity">
+        <button class="button secondary" type="submit">Update</button>
+      </form>
+      <div class="line-price">${{ item.line_total }}</div>
+    </div>
+  {% empty %}
+    <p class="empty">Your cart is empty.</p>
+  {% endfor %}
+</div>
+{% if cart.warning %}<p class="notice">{{ cart.warning }}</p>{% endif %}

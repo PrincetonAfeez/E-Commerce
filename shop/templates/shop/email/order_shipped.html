@@ -1,0 +1,6 @@
+{% extends "shop/email/base_email.html" %}
+{% block content %}
+  <p>Good news — order <strong>{{ order.order_number }}</strong> has shipped.</p>
+  {% if payload.tracking %}<p>Tracking number: <strong>{{ payload.tracking }}</strong></p>{% endif %}
+  <p><a href="{{ order_link }}">Track your order</a></p>
+{% endblock %}

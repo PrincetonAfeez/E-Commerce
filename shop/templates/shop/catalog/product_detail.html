@@ -1,0 +1,109 @@
+{% extends "shop/base.html" %}
+{% block title %}{{ product.seo_title|default:product.name }} · {{ store.store_name }}{% endblock %}
+{% block meta_description %}{{ product.meta_description|default:product.description|striptags|truncatechars:160 }}{% endblock %}
+{% block head_extra %}
+  {% with image=product.images.first variant=product.variants.first %}
+    <link rel="canonical" href="{{ request.scheme }}://{{ request.get_host }}{{ request.path }}">
+    <meta property="og:type" content="product">
+    <meta property="og:title" content="{{ product.name }}">
+    <meta property="og:description" content="{{ product.meta_description|default:product.description|striptags|truncatechars:160 }}">
+    <meta property="og:url" content="{{ request.scheme }}://{{ request.get_host }}{{ request.path }}">
+    {% if image.image_url %}<meta property="og:image" content="{{ image.image_url }}">{% elif image.image %}<meta property="og:image" content="{{ request.scheme }}://{{ request.get_host }}{{ image.image.url }}">{% endif %}
+    <meta name="twitter:card" content="summary_large_image">
+    <script type="application/ld+json">
+    {"@context":"https://schema.org/","@type":"Product","name":"{{ product.name|escapejs }}","description":"{{ product.description|striptags|truncatechars:300|escapejs }}"{% if variant %},"sku":"{{ variant.sku|escapejs }}","offers":{"@type":"Offer","price":"{{ variant.price }}","priceCurrency":"{{ variant.currency }}","availability":"https://schema.org/{% if variant.available_to_sell > 0 %}InStock{% else %}OutOfStock{% endif %}"}{% endif %}{% if avg_rating %},"aggregateRating":{"@type":"AggregateRating","ratingValue":"{{ avg_rating }}","reviewCount":"{{ review_count }}"}{% endif %}}
+    </script>
+  {% endwith %}
+{% endblock %}
+{% block content %}
+<section class="detail-layout">
+  <div class="gallery">
+    {% with image=product.images.first %}
+      {% if image and image.image_url %}
+        <img src="{{ image.image_url }}" alt="{{ image.alt_text|default:product.name }}">
+      {% elif image and image.image %}
+        <img src="{{ image.image.url }}" alt="{{ image.alt_text|default:product.name }}">
+      {% else %}
+        <div class="media-fallback">{{ product.name }}</div>
+      {% endif %}
+    {% endwith %}
+  </div>
+  <div class="detail-main">
+    <p class="eyebrow">{{ product.category.name|default:"Featured" }}</p>
+    <h1>{{ product.name }}</h1>
+    {% if avg_rating %}<p class="rating">★ {{ avg_rating }} ({{ review_count }} review{{ review_count|pluralize }})</p>{% endif %}
+    <p>{{ product.description }}</p>
+    <div class="variant-list">
+      {% for variant in product.variants.all %}
+        {% with available=variant.available_to_sell vis=product.stock_visibility %}
+          {% if available > 0 or vis != "hide_oos" %}
+            <div class="variant-row">
+              <form method="post" action="{% url 'cart:add' %}" hx-post="{% url 'cart:add' %}" hx-target="#cart-panel" hx-swap="outerHTML">
+                {% csrf_token %}
+                <input type="hidden" name="variant_id" value="{{ variant.id }}">
+                <div>
+                  <strong>{{ variant.display_name }}</strong>
+                  <span>{{ variant.sku }}</span>
+                </div>
+                <div>{% include "shop/catalog/partials/_price.html" with variant=variant %}</div>
+                {% include "shop/catalog/partials/_stock_badge.html" with variant=variant %}
+                <input class="qty" type="number" name="quantity" value="1" min="1" aria-label="Quantity"{% if available <= 0 %} disabled{% endif %}>
+                <button class="button" type="submit"{% if available <= 0 %} disabled{% endif %}>Add</button>
+              </form>
+              {% if request.user.is_authenticated %}
+                <form method="post" action="{% url 'account:wishlist_toggle' %}">
+                  {% csrf_token %}
+                  <input type="hidden" name="variant_id" value="{{ variant.id }}">
+                  <button class="link-button" type="submit">{% if variant.id in wishlisted %}♥ Saved{% else %}♡ Save{% endif %}</button>
+                </form>
+              {% endif %}
+            </div>
+          {% endif %}
+        {% endwith %}
+      {% endfor %}
+    </div>
+  </div>
+</section>
+<div id="cart-panel" class="drawer-target" aria-live="polite"></div>
+<section class="reviews">
+  <h2>Reviews {% if avg_rating %}· ★ {{ avg_rating }}{% endif %}</h2>
+  {% if can_review %}
+    <form class="form-panel" method="post" action="{% url 'reviews:submit' product.slug %}">
+      {% csrf_token %}
+      <label>Rating
+        <select name="rating">
+          <option value="5">5 ★</option><option value="4">4 ★</option><option value="3">3 ★</option>
+          <option value="2">2 ★</option><option value="1">1 ★</option>
+        </select>
+      </label>
+      <label>Title <input type="text" name="title" maxlength="140"></label>
+      <label>Review <textarea name="body"></textarea></label>
+      <button class="button" type="submit">Submit review</button>
+    </form>
+  {% elif request.user.is_authenticated %}
+    <p class="empty">You can review this after purchasing it.</p>
+  {% endif %}
+  {% for review in reviews %}
+    <div class="review-card">
+      <strong>{{ review.rating }}★ {{ review.title }}</strong>
+      {% if review.verified_purchase %}<span class="stock ok">Verified purchase</span>{% endif %}
+      <p>{{ review.body }}</p>
+      <small>{{ review.author_name|default:"Customer" }} · {{ review.created_at|date:"M j, Y" }}</small>
+    </div>
+  {% empty %}
+    <p class="empty">No reviews yet.</p>
+  {% endfor %}
+</section>
+{% if related %}
+  <section class="related">
+    <h2>You may also like</h2>
+    {% include "shop/catalog/partials/_product_grid.html" with products=related %}
+  </section>
+{% endif %}
+{% if recently_viewed %}
+  <section class="related">
+    <h2>Recently viewed</h2>
+    {% include "shop/catalog/partials/_product_grid.html" with products=recently_viewed %}
+  </section>
+{% endif %}
+{% endblock %}

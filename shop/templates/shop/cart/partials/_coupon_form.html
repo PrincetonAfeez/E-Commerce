@@ -1,0 +1,8 @@
+<form class="coupon-form" method="post" action="{% url 'cart:apply_coupon' %}" hx-post="{% url 'cart:apply_coupon' %}" hx-target="#cart-panel" hx-swap="outerHTML">
+  {% csrf_token %}
+  <input type="text" name="code" placeholder="Coupon code" value="{{ cart.coupon_code.normalized_code|default:'' }}">
+  <button class="button secondary" type="submit">Apply</button>
+  {% if cart.coupon_code %}
+    <button class="button ghost" type="submit" formaction="{% url 'cart:remove_coupon' %}" hx-post="{% url 'cart:remove_coupon' %}">Remove</button>
+  {% endif %}
+</form>

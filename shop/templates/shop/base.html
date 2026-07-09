@@ -1,0 +1,68 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ store.store_name }}{% endblock %}</title>
+  <meta name="description" content="{% block meta_description %}{{ store.tagline }}{% endblock %}">
+  <link rel="stylesheet" href="{% static 'shop/app.css' %}">
+  <link rel="stylesheet" href="{% url 'theme_css' %}">
+  <script src="{% static 'shop/htmx.min.js' %}" defer></script>
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{% url 'catalog:list' %}">
+      {% if store.logo %}<img class="brand-logo" src="{{ store.logo.url }}" alt="{{ store.store_name }}">{% else %}{{ store.store_name }}{% endif %}
+    </a>
+    <form class="search" action="{% url 'catalog:list' %}">
+      <input type="search" name="q" value="{{ query|default:'' }}" placeholder="Search catalog">
+    </form>
+    <nav class="nav">
+      <a href="{% url 'cart:detail' %}">Cart{% if cart %} <span class="badge">{{ cart.item_count }}</span>{% endif %}</a>
+      {% if request.user.is_authenticated %}
+        <a href="{% url 'orders:history' %}">Orders</a>
+        <a href="{% url 'account:wishlist' %}">Wishlist</a>
+        <a href="{% url 'account:addresses' %}">Addresses</a>
+        <a href="{% url 'account:store_credit' %}">Credit</a>
+        <a href="{% url 'account:subscriptions' %}">Subscriptions</a>
+        <form class="inline-form" method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="link-button">Log out</button></form>
+      {% else %}
+        <a href="{% url 'login' %}">Log in</a>
+        <a href="{% url 'register' %}">Sign up</a>
+      {% endif %}
+      {% if is_tenant_staff %}
+        <a href="{% url 'staff_ops:dashboard' %}">Dashboard</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  {% if request.user.is_authenticated and not request.user.profile.email_verified %}
+    <div class="verify-banner">
+      Please verify your email address.
+      <form class="inline-form" method="post" action="{% url 'resend_verification' %}">
+        {% csrf_token %}<button class="link-button" type="submit">Resend link</button>
+      </form>
+    </div>
+  {% endif %}
+
+  {% if messages %}
+    <div class="messages">
+      {% for message in messages %}
+        <div class="message {{ message.tags }}">{{ message }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <a href="{% url 'terms' %}">Terms</a>
+    <a href="{% url 'privacy' %}">Privacy</a>
+    <a href="{% url 'orders:lookup' %}">Track order</a>
+  </footer>
+</body>
+</html>

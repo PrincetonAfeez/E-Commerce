@@ -1,0 +1,27 @@
+{% extends "shop/base.html" %}
+{% block title %}Your wishlist · Aster Commerce{% endblock %}
+{% block content %}
+<h1>Your wishlist</h1>
+<div class="line-list">
+  {% for item in items %}
+    <div class="line-item">
+      <div>
+        <strong><a href="{% url 'catalog:detail' item.variant.product.slug %}">{{ item.variant.product.name }}</a></strong>
+        <span>{{ item.variant.display_name }} · ${{ item.variant.price }}</span>
+      </div>
+      <form method="post" action="{% url 'cart:add' %}">
+        {% csrf_token %}
+        <input type="hidden" name="variant_id" value="{{ item.variant.id }}">
+        <button class="button" type="submit">Add to cart</button>
+      </form>
+      <form method="post" action="{% url 'account:wishlist_toggle' %}">
+        {% csrf_token %}
+        <input type="hidden" name="variant_id" value="{{ item.variant.id }}">
+        <button class="link-button" type="submit">Remove</button>
+      </form>
+    </div>
+  {% empty %}
+    <p class="empty">Your wishlist is empty.</p>
+  {% endfor %}
+</div>
+{% endblock %}

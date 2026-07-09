@@ -1,0 +1,8 @@
+<aside id="cart-panel" class="summary-panel">
+  {% include "shop/cart/partials/_cart_lines.html" %}
+  {% include "shop/cart/partials/_coupon_form.html" %}
+  {% include "shop/cart/partials/_cart_totals.html" %}
+  {% if cart.items.exists %}
+    <a class="button full" href="{% url 'checkout:start' %}">Checkout</a>
+  {% endif %}
+</aside>

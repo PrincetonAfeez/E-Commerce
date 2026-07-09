@@ -1,0 +1,25 @@
+{% extends "shop/base.html" %}
+{% block title %}Order {{ order.order_number }} · Aster Commerce{% endblock %}
+{% block content %}
+<section class="complete">
+  <h1>{{ order.order_number }}</h1>
+  <p class="notice">Paid · {{ order.created_at|date:"M j, Y g:i A" }}</p>
+  <div class="summary-panel">
+    <div class="line-list">
+      {% for item in order.items.all %}
+        <div class="line-item compact">
+          <div><strong>{{ item.product_name }}</strong><span>{{ item.sku }}</span></div>
+          <span>{{ item.quantity }} × ${{ item.unit_price }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <dl class="totals">
+      <div><dt>Total</dt><dd>${{ order.total }}</dd></div>
+      <div><dt>Status</dt><dd>{{ order.paid_status|title }}</dd></div>
+    </dl>
+    {% if not order.user_id %}
+      <a class="button secondary" href="{% url 'orders:detail' order.order_number %}?token={{ order.order_token }}">Guest order link</a>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

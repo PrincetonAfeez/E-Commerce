@@ -1,0 +1,28 @@
+{% extends "shop/base.html" %}
+{% block title %}Subscriptions · {{ store.store_name }}{% endblock %}
+{% block content %}
+<h1>Your subscriptions</h1>
+<table class="data-table">
+  <thead><tr><th>Product</th><th>Every</th><th>Price</th><th>Next renewal</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+    {% for sub in subscriptions %}
+      <tr>
+        <td>{{ sub.variant.product.name }} <small>({{ sub.variant.sku }})</small></td>
+        <td>{{ sub.interval|title }}</td>
+        <td>${{ sub.unit_price }} × {{ sub.quantity }}</td>
+        <td>{{ sub.next_renewal_at|date:"M j, Y" }}</td>
+        <td>{{ sub.get_status_display }}</td>
+        <td>
+          {% if sub.status == "active" or sub.status == "past_due" %}
+            <form class="inline-form" method="post" action="{% url 'account:cancel_subscription' sub.pk %}">
+              {% csrf_token %}<button class="link-button" type="submit">Cancel</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6" class="empty">No active subscriptions.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

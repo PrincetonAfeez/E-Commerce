@@ -1,0 +1,41 @@
+{% extends "shop/base.html" %}
+{% block title %}Your addresses · Aster Commerce{% endblock %}
+{% block content %}
+<section class="account-layout">
+  <div>
+    <h1>Saved addresses</h1>
+    {% for a in addresses %}
+      <div class="address-card">
+        <strong>{{ a.name }}{% if a.is_default %} · Default{% endif %}</strong>
+        <p>{{ a.address1 }}{% if a.address2 %}, {{ a.address2 }}{% endif %}<br>
+          {{ a.city }}, {{ a.region }} {{ a.postal_code }} · {{ a.country }}</p>
+        <div class="row">
+          {% if not a.is_default %}
+            <form method="post" action="{% url 'account:address_default' a.pk %}">{% csrf_token %}<button class="link-button" type="submit">Make default</button></form>
+          {% endif %}
+          <form method="post" action="{% url 'account:address_delete' a.pk %}">{% csrf_token %}<button class="link-button" type="submit">Delete</button></form>
+        </div>
+      </div>
+    {% empty %}
+      <p class="empty">You have no saved addresses yet.</p>
+    {% endfor %}
+    <p><a href="{% url 'account:delete' %}">Your data &amp; privacy (export or delete account)</a></p>
+  </div>
+  <aside class="form-panel">
+    <h2>Add an address</h2>
+    <form method="post" action="{% url 'account:address_create' %}">
+      {% csrf_token %}
+      <label>Label <input type="text" name="label" placeholder="Home"></label>
+      <label>Name <input type="text" name="name" required></label>
+      <label>Address <input type="text" name="address1" required></label>
+      <label>Apt / suite <input type="text" name="address2"></label>
+      <label>City <input type="text" name="city" required></label>
+      <label>State <input type="text" name="region"></label>
+      <label>ZIP <input type="text" name="postal_code" required></label>
+      <label>Country <input type="text" name="country" value="US" maxlength="2"></label>
+      <label class="check"><input type="checkbox" name="is_default"> Set as default</label>
+      <button class="button" type="submit">Save address</button>
+    </form>
+  </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "shop/base.html" %}
+{% block title %}Staff {{ order.order_number }} · Aster Commerce{% endblock %}
+{% block content %}
+<section class="staff-layout">
+  <div>
+    <h1>{{ order.order_number }}</h1>
+    <p class="notice">{{ order.paid_status|title }} · ${{ order.total }} · Refunded ${{ order.refund_total }}</p>
+    <div class="line-list">
+      {% for item in order.items.all %}
+        <div class="line-item compact">
+          <div><strong>{{ item.product_name }}</strong><span>{{ item.sku }}</span></div>
+          <span>{{ item.quantity }} × ${{ item.unit_price }}</span>
+        </div>
+      {% endfor %}
+    </div>
+
+    <h2>Timeline</h2>
+    {% for event in order.status_events.all %}
+      <div class="timeline-item"><strong>{{ event.event_type }}</strong><span>{{ event.from_status }} -> {{ event.to_status }}</span></div>
+    {% endfor %}
+  </div>
+
+  <aside class="summary-panel">
+    {% include "shop/staff_ops/partials/_fulfillment_panel.html" %}
+    {% if order.refundable %}{% include "shop/staff_ops/partials/_refund_panel.html" %}{% endif %}
+  </aside>
+</section>
+{% endblock %}

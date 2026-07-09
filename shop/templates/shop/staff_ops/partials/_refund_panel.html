@@ -1,0 +1,11 @@
+<section>
+  <h2>Refund</h2>
+  <form class="stack" method="post" action="{% url 'staff_ops:refund' order.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="idempotency_key" value="{{ refund_idempotency_key }}">
+    <label>Amount <input type="number" step="0.01" min="0.01" max="{{ order.total }}" name="amount" value="{{ order.total }}"></label>
+    <label class="check"><input type="checkbox" name="restock"> Restock returned items</label>
+    <label>Reason <textarea name="reason"></textarea></label>
+    <button class="button secondary" type="submit">Create refund</button>
+  </form>
+</section>

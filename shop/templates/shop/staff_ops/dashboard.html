@@ -1,0 +1,68 @@
+{% extends "shop/base.html" %}
+{% block title %}Dashboard · Aster Commerce{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div><h1>Merchant dashboard</h1><p>Last {{ window_days }} days</p></div>
+  <div>
+    <a class="button secondary" href="{% url 'staff_ops:queue' %}">Orders</a>
+    <a class="button secondary" href="{% url 'staff_ops:returns' %}">Returns</a>
+    <a class="button secondary" href="{% url 'staff_ops:low_stock' %}">Low stock</a>
+    <a class="button secondary" href="{% url 'staff_ops:settings' %}">Settings</a>
+    <a class="button secondary" href="{% url 'staff_ops:billing' %}">Billing</a>
+    <a class="button secondary" href="{% url 'staff_ops:team' %}">Team</a>
+  </div>
+</section>
+
+{% if usage.product_over or usage.order_over %}
+  <p class="verify-banner">You've reached a limit on the {{ usage.plan.name }} plan. <a href="{% url 'staff_ops:billing' %}">Upgrade</a> to keep growing.</p>
+{% endif %}
+
+<div class="metric-grid">
+  <div class="metric-card"><span class="metric-label">Net revenue</span><strong>${{ net_revenue }}</strong></div>
+  <div class="metric-card"><span class="metric-label">Gross</span><strong>${{ gross_revenue }}</strong></div>
+  <div class="metric-card"><span class="metric-label">Refunds</span><strong>${{ refunds }}</strong></div>
+  <div class="metric-card"><span class="metric-label">Orders</span><strong>{{ order_count }}</strong></div>
+  <div class="metric-card"><span class="metric-label">Avg order value</span><strong>${{ aov }}</strong></div>
+  <div class="metric-card"><span class="metric-label">Outbox pending</span><strong>{{ outbox_pending }}</strong></div>
+  <div class="metric-card"><span class="metric-label">Failed emails</span><strong>{{ email_failed }}</strong></div>
+</div>
+
+<section class="panel">
+  <h2>Revenue ({{ window_days }} days)</h2>
+  <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img" aria-label="Daily revenue" class="chart">
+    {% for bar in chart.bars %}
+      <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.w }}" height="{{ bar.h }}" class="bar">
+        <title>{{ bar.day }}: ${{ bar.revenue }}</title>
+      </rect>
+    {% endfor %}
+  </svg>
+</section>
+
+<section class="panel">
+  <h2>Top products</h2>
+  <table class="data-table">
+    <thead><tr><th>Product</th><th>SKU</th><th>Units</th><th>Revenue</th></tr></thead>
+    <tbody>
+      {% for p in top_products %}
+        <tr><td>{{ p.product_name }}</td><td>{{ p.sku }}</td><td>{{ p.units }}</td><td>${{ p.revenue }}</td></tr>
+      {% empty %}
+        <tr><td colspan="4" class="empty">No sales yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Low stock</h2>
+  <table class="data-table">
+    <thead><tr><th>SKU</th><th>Product</th><th>Available</th><th>Reorder point</th></tr></thead>
+    <tbody>
+      {% for v in low_stock %}
+        <tr><td>{{ v.sku }}</td><td>{{ v.product.name }}</td><td>{{ v.available }}</td><td>{{ v.reorder_point }}</td></tr>
+      {% empty %}
+        <tr><td colspan="4" class="empty">Everything is well stocked.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

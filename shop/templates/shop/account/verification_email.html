@@ -1,0 +1,12 @@
+{% autoescape off %}
+Hi {{ user.username }},
+
+Thanks for creating an Aster Commerce account. Please confirm your email address
+by opening the link below:
+
+{{ verification_link }}
+
+If you did not create this account, you can ignore this email.
+
+— Aster Commerce
+{% endautoescape %}

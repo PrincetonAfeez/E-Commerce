@@ -1,0 +1,10 @@
+{% extends "shop/base.html" %}
+{% block title %}Store created · {{ tenant.name }}{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <h1>🎉 {{ tenant.name }} is live</h1>
+  <p>Your store is ready. Log in at your store address to manage it:</p>
+  <p><a class="button" href="{{ store_url }}">{{ store_url }}</a></p>
+  <p><small>You're on the Starter plan (trial). Manage your plan from your store's Billing page.</small></p>
+</section>
+{% endblock %}

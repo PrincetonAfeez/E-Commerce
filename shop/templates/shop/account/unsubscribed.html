@@ -1,0 +1,9 @@
+{% extends "shop/base.html" %}
+{% block title %}Unsubscribed · {{ store.store_name }}{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <h1>You're unsubscribed</h1>
+  <p>{{ email }} will no longer receive marketing emails such as cart reminders.
+     You'll still get transactional emails about your orders.</p>
+</section>
+{% endblock %}

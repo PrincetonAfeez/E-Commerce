@@ -1,0 +1,35 @@
+{% extends "shop/base.html" %}
+{% block title %}Store settings · {{ store.store_name }}{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div><h1>Store settings</h1><p>Branding, contact, and setup</p></div>
+  <a class="button secondary" href="{% url 'staff_ops:dashboard' %}">Dashboard</a>
+</section>
+
+<section class="account-layout">
+  <aside class="form-panel">
+    <h2>Branding</h2>
+    <form method="post" enctype="multipart/form-data" action="{% url 'staff_ops:settings' %}">
+      {% csrf_token %}
+      <label>Store name <input type="text" name="store_name" value="{{ store.store_name }}" required></label>
+      <label>Tagline <input type="text" name="tagline" value="{{ store.tagline }}"></label>
+      <label>Support email <input type="email" name="support_email" value="{{ store.support_email }}"></label>
+      <label>Primary color <input type="color" name="primary_color" value="{{ store.primary_color }}"></label>
+      <label>Accent color <input type="color" name="accent_color" value="{{ store.accent_color }}"></label>
+      <label>Currency <input type="text" name="currency" value="{{ store.currency }}" maxlength="3"></label>
+      <label>Logo <input type="file" name="logo" accept="image/*"></label>
+      <button class="button" type="submit">Save settings</button>
+    </form>
+  </aside>
+  <div>
+    <h2>Setup checklist</h2>
+    <ul class="checklist">
+      {% for step in checklist %}
+        <li class="{% if step.done %}done{% else %}todo{% endif %}">
+          {% if step.done %}✓{% else %}○{% endif %} {{ step.label }}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+{% endblock %}

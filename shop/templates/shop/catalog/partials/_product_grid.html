@@ -1,0 +1,39 @@
+<div class="product-grid">
+  {% for product in products %}
+    <article class="product-card">
+      <a class="product-media" href="{% url 'catalog:detail' product.slug %}">
+        {% with image=product.images.first %}
+          {% if image %}
+            {% if image.image_url %}
+              <img src="{{ image.image_url }}" alt="{{ image.alt_text|default:product.name }}">
+            {% elif image.image %}
+              <img src="{{ image.image.url }}" alt="{{ image.alt_text|default:product.name }}">
+            {% endif %}
+          {% else %}
+            <span>{{ product.name }}</span>
+          {% endif %}
+        {% endwith %}
+      </a>
+      <div class="product-body">
+        <h2><a href="{% url 'catalog:detail' product.slug %}">{{ product.name }}</a></h2>
+        <p>{{ product.description|truncatechars:110 }}</p>
+        {% with variant=product.variants.first %}
+          {% if variant %}
+            <div class="product-row">
+              {% include "shop/catalog/partials/_price.html" with variant=variant %}
+              {% include "shop/catalog/partials/_stock_badge.html" with variant=variant %}
+            </div>
+            <form method="post" action="{% url 'cart:add' %}" hx-post="{% url 'cart:add' %}" hx-target="#cart-panel" hx-swap="outerHTML">
+              {% csrf_token %}
+              <input type="hidden" name="variant_id" value="{{ variant.id }}">
+              <input class="qty" type="number" name="quantity" value="1" min="1" aria-label="Quantity">
+              <button class="button" type="submit">Add</button>
+            </form>
+          {% endif %}
+        {% endwith %}
+      </div>
+    </article>
+  {% empty %}
+    <p class="empty">No products match this search.</p>
+  {% endfor %}
+</div>

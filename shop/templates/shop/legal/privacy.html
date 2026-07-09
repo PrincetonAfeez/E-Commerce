@@ -1,0 +1,39 @@
+{% extends "shop/base.html" %}
+{% block title %}Privacy Policy · {{ store.store_name }}{% endblock %}
+{% block content %}
+<article class="legal-page">
+  <h1>Privacy Policy</h1>
+  <p><em>Last updated {{ updated }}.</em></p>
+
+  <h2>1. What we collect</h2>
+  <p>Account details (name, email), order and shipping information, and technical data
+     such as IP address and request logs needed to operate and secure the service.</p>
+
+  <h2>2. How we use it</h2>
+  <p>To create and manage your account, process and fulfil orders, provide support,
+     prevent fraud and abuse, and meet legal obligations. Marketing emails (such as
+     cart reminders) are optional and every one includes a one-click unsubscribe link.</p>
+
+  <h2>3. Payments</h2>
+  <p>This deployment uses a <strong>simulated payment gateway</strong>; no real card data
+     is collected, stored, or transmitted to a payment processor.</p>
+
+  <h2>4. Your rights</h2>
+  <p>You can export a copy of your personal data or delete your account at any time from
+     your <a href="{% url 'account:data_export' %}">privacy settings</a>. When you delete
+     your account, we anonymize the personal data on past orders while retaining the order
+     records we are legally required to keep (e.g. for tax and accounting).</p>
+
+  <h2>5. Sharing &amp; subprocessors</h2>
+  <p>We share data only with service providers needed to run the platform (hosting, email
+     delivery, error monitoring) under contract, and where required by law. See
+     <code>SECURITY.md</code> for the current subprocessor list.</p>
+
+  <h2>6. Retention</h2>
+  <p>We keep personal data only as long as needed for the purposes above or as required by
+     law, then delete or anonymize it. Audit logs are append-only and retained for security.</p>
+
+  <h2>7. Contact</h2>
+  <p>For any privacy request, contact the store operator or the platform administrator.</p>
+</article>
+{% endblock %}

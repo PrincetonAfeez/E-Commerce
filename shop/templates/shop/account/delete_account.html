@@ -1,0 +1,16 @@
+{% extends "shop/base.html" %}
+{% block title %}Delete account · {{ store.store_name }}{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <h1>Your data & account</h1>
+  <p><a class="button secondary" href="{% url 'account:data_export' %}">Download my data (JSON)</a></p>
+  <h2>Delete account</h2>
+  <p>This permanently deletes your account and personal data. Past orders are kept in an
+     anonymized form for the store's legal/accounting records.</p>
+  <form class="form-panel" method="post" action="{% url 'account:delete' %}">
+    {% csrf_token %}
+    <label class="check"><input type="checkbox" name="confirm" required> I understand this cannot be undone</label>
+    <button class="button danger" type="submit">Delete my account</button>
+  </form>
+</section>
+{% endblock %}

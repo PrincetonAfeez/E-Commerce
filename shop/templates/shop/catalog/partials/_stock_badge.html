@@ -1,0 +1,12 @@
+{% with available=variant.available_to_sell vis=variant.product.stock_visibility %}
+  {% if available <= 0 %}
+    {% if vis != "hide_oos" %}<span class="stock out">Out of stock</span>{% endif %}
+  {% elif vis == "exact" %}
+    <span class="stock ok">{{ available }} in stock</span>
+  {% elif vis == "low_stock" %}
+    {% if available <= 5 %}<span class="stock warn">Low stock</span>{% else %}<span class="stock ok">In stock</span>{% endif %}
+  {% else %}
+    {# availability / disable_oos / hide_oos (in-stock case): show availability only #}
+    <span class="stock ok">In stock</span>
+  {% endif %}
+{% endwith %}

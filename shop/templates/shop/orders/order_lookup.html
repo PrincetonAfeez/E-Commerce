@@ -1,0 +1,14 @@
+{% extends "shop/base.html" %}
+{% block title %}Find your order · Aster Commerce{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <form class="form-panel" method="post">
+    {% csrf_token %}
+    <h1>Find your order</h1>
+    <p>Enter the email and order number from your confirmation and we'll send a secure link.</p>
+    <label>Email <input type="email" name="email" required></label>
+    <label>Order number <input type="text" name="order_number" placeholder="EC-YYYYMMDD-XXXXXXXX" required></label>
+    <button class="button" type="submit">Email me the link</button>
+  </form>
+</section>
+{% endblock %}

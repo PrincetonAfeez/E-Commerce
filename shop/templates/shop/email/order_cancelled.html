@@ -1,0 +1,6 @@
+{% extends "shop/email/base_email.html" %}
+{% block content %}
+  <p>Order <strong>{{ order.order_number }}</strong> has been cancelled.</p>
+  {% if order.refund_total %}<p>A refund of ${{ order.refund_total }} has been issued to your original payment method.</p>{% endif %}
+  <p><a href="{{ order_link }}">View your order</a></p>
+{% endblock %}

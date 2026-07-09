@@ -1,0 +1,8 @@
+{% extends "shop/email/base_email.html" %}
+{% block content %}
+  <p>You left {{ payload.item_count }} item{{ payload.item_count|pluralize }} in your cart.</p>
+  {% if payload.total %}<p>Cart total: <strong>${{ payload.total }}</strong></p>{% endif %}
+  <p>Your items are still waiting — complete your order before they sell out.</p>
+  <p><a href="{{ site_url }}/cart/">Return to your cart</a></p>
+  {% if unsubscribe_url %}<p><small><a href="{{ unsubscribe_url }}">Unsubscribe from cart reminders</a></small></p>{% endif %}
+{% endblock %}

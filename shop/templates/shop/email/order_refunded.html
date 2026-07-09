@@ -1,0 +1,6 @@
+{% extends "shop/email/base_email.html" %}
+{% block content %}
+  <p>A refund of <strong>${{ payload.amount }}</strong> was issued for order <strong>{{ order.order_number }}</strong>.</p>
+  <p>It may take a few business days to appear on your statement.</p>
+  <p><a href="{{ order_link }}">View your order</a></p>
+{% endblock %}

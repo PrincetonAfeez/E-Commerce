@@ -1,0 +1,5 @@
+{% extends "shop/email/base_email.html" %}
+{% block content %}
+  <p>Order <strong>{{ order.order_number }}</strong> was delivered. We hope you love it!</p>
+  <p><a href="{{ order_link }}">View your order</a> — and consider leaving a review.</p>
+{% endblock %}

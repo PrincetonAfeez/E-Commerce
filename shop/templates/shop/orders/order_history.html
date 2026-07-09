@@ -1,0 +1,29 @@
+{% extends "shop/base.html" %}
+{% block title %}Orders · Aster Commerce{% endblock %}
+{% block content %}
+<section>
+  <h1>Orders</h1>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Order</th><th>Status</th><th>Total</th><th>Date</th><th></th></tr></thead>
+      <tbody>
+        {% for order in orders %}
+          <tr>
+            <td><a href="{% url 'orders:detail' order.order_number %}">{{ order.order_number }}</a></td>
+            <td>{{ order.paid_status|title }}</td>
+            <td>${{ order.total }}</td>
+            <td>{{ order.created_at|date:"M j, Y" }}</td>
+            <td>
+              <form class="inline-form" method="post" action="{% url 'orders:reorder' order.order_number %}">
+                {% csrf_token %}<button class="link-button" type="submit">Reorder</button>
+              </form>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5">No orders yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

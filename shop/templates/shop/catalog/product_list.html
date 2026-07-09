@@ -1,0 +1,58 @@
+{% extends "shop/base.html" %}
+{% block title %}Catalog · Aster Commerce{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div>
+    <h1>Catalog</h1>
+    <p>{{ page.paginator.count }} active products</p>
+  </div>
+  <a class="button secondary" href="{% url 'cart:detail' %}">View cart</a>
+</section>
+
+<form class="catalog-filters" method="get" action="{% url 'catalog:list' %}">
+  <input type="search" name="q" value="{{ query }}" placeholder="Search">
+  <select name="category">
+    <option value="">All categories</option>
+    {% for cat in categories %}
+      <option value="{{ cat.slug }}"{% if cat.slug == category %} selected{% endif %}>{{ cat.name }}</option>
+    {% endfor %}
+  </select>
+  <select name="collection">
+    <option value="">All collections</option>
+    {% for col in collections %}
+      <option value="{{ col.slug }}"{% if col.slug == collection %} selected{% endif %}>{{ col.name }}</option>
+    {% endfor %}
+  </select>
+  <input type="number" step="0.01" min="0" name="min_price" value="{{ min_price }}" placeholder="Min price">
+  <input type="number" step="0.01" min="0" name="max_price" value="{{ max_price }}" placeholder="Max price">
+  <button class="button secondary" type="submit">Filter</button>
+</form>
+
+{% if facets %}
+  <div class="facets">
+    <span class="facet-label">Categories:</span>
+    {% for f in facets %}
+      <a class="facet-chip{% if f.category__slug == category %} active{% endif %}" href="?category={{ f.category__slug }}{% if query %}&q={{ query }}{% endif %}">{{ f.category__name }} ({{ f.count }})</a>
+    {% endfor %}
+    {% if category %}<a class="facet-chip" href="?{% if query %}q={{ query }}{% endif %}">Clear</a>{% endif %}
+  </div>
+{% endif %}
+
+{% if featured %}
+  <section class="featured">
+    <h2>Featured</h2>
+    {% include "shop/catalog/partials/_product_grid.html" with products=featured %}
+  </section>
+{% endif %}
+
+{% include "shop/catalog/partials/_product_grid.html" with products=page.object_list %}
+<div id="cart-panel" class="drawer-target" aria-live="polite"></div>
+
+{% if page.has_other_pages %}
+  <nav class="pagination">
+    {% if page.has_previous %}<a href="?page={{ page.previous_page_number }}{% if query %}&q={{ query }}{% endif %}">Previous</a>{% endif %}
+    <span>Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a href="?page={{ page.next_page_number }}{% if query %}&q={{ query }}{% endif %}">Next</a>{% endif %}
+  </nav>
+{% endif %}
+{% endblock %}

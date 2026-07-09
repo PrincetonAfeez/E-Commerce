@@ -1,0 +1,66 @@
+{% extends "shop/base.html" %}
+{% block title %}Billing · {{ store.store_name }}{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div>
+    <h1>Plan &amp; billing</h1>
+    <p>Current plan: <strong>{{ subscription.plan.name|default:"None" }}</strong> · {{ subscription.get_status_display }}</p>
+  </div>
+  <a class="button secondary" href="{% url 'staff_ops:dashboard' %}">Dashboard</a>
+</section>
+
+<p class="notice">Billing is simulated — switching plans takes effect immediately without a charge.</p>
+
+<div class="metric-grid">
+  <div class="metric-card">
+    <span class="metric-label">Products</span>
+    <strong>{{ usage.product_count }}{% if usage.product_limit %} / {{ usage.product_limit }}{% else %} / ∞{% endif %}</strong>
+    {% if usage.product_over %}<span class="stock out">Limit reached</span>{% endif %}
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Orders this month</span>
+    <strong>{{ usage.orders_month }}{% if usage.order_limit %} / {{ usage.order_limit }}{% else %} / ∞{% endif %}</strong>
+    {% if usage.order_over %}<span class="stock warn">Over limit</span>{% endif %}
+  </div>
+</div>
+{% if usage.product_over or usage.order_over %}
+  <p class="verify-banner">You've reached a limit on your current plan. Upgrade below to keep growing.</p>
+{% endif %}
+
+<div class="plan-grid">
+  {% for plan in plans %}
+    <div class="plan-card{% if plan.pk == subscription.plan_id %} current{% endif %}">
+      <h2>{{ plan.name }}</h2>
+      <p><strong>${{ plan.price_monthly }}</strong> / month</p>
+      <ul>
+        <li>{% if plan.max_products %}Up to {{ plan.max_products }} products{% else %}Unlimited products{% endif %}</li>
+        <li>{% if plan.max_orders_per_month %}{{ plan.max_orders_per_month }} orders/mo{% else %}Unlimited orders{% endif %}</li>
+        {% for f in plan.features %}<li>{{ f }}</li>{% endfor %}
+      </ul>
+      {% if plan.pk == subscription.plan_id %}
+        <button class="button" disabled>Current plan</button>
+      {% else %}
+        <form method="post" action="{% url 'staff_ops:billing' %}">
+          {% csrf_token %}
+          <input type="hidden" name="plan" value="{{ plan.slug }}">
+          <button class="button" type="submit">Choose {{ plan.name }}</button>
+        </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+{% if invoices %}
+  <section class="panel">
+    <h2>Invoices</h2>
+    <table class="data-table">
+      <thead><tr><th>Period</th><th>Plan</th><th>Orders</th><th>Amount</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for inv in invoices %}
+          <tr><td>{{ inv.period_start }} – {{ inv.period_end }}</td><td>{{ inv.plan_name }}</td><td>{{ inv.orders_count }}</td><td>${{ inv.amount }}</td><td>{{ inv.get_status_display }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endif %}
+{% endblock %}

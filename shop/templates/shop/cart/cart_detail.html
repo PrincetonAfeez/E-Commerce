@@ -1,0 +1,8 @@
+{% extends "shop/base.html" %}
+{% block title %}Cart · Aster Commerce{% endblock %}
+{% block content %}
+<section class="cart-layout">
+  <div><h1>Cart</h1></div>
+  {% include "shop/cart/partials/_cart_panel.html" %}
+</section>
+{% endblock %}

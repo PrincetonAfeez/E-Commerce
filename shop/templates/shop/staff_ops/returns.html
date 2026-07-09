@@ -1,0 +1,36 @@
+{% extends "shop/base.html" %}
+{% block title %}Returns · Aster Commerce{% endblock %}
+{% block content %}
+<section class="catalog-header">
+  <div><h1>Return requests</h1></div>
+  <a class="button secondary" href="{% url 'staff_ops:dashboard' %}">Dashboard</a>
+</section>
+<table class="data-table">
+  <thead><tr><th>#</th><th>Order</th><th>Status</th><th>Items</th><th>Reason</th><th>Actions</th></tr></thead>
+  <tbody>
+    {% for rr in returns %}
+      <tr>
+        <td>{{ rr.pk }}</td>
+        <td><a href="{% url 'staff_ops:order_detail' rr.order.pk %}">{{ rr.order.order_number }}</a></td>
+        <td>{{ rr.get_status_display }}</td>
+        <td>{% for line in rr.lines.all %}{{ line.quantity }}× {{ line.order_item.sku }}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+        <td>{{ rr.reason|truncatechars:60 }}</td>
+        <td>
+          {% if rr.status == "requested" %}
+            <form class="inline-form" method="post" action="{% url 'staff_ops:return_approve' rr.pk %}">
+              {% csrf_token %}<input type="hidden" name="restock" value="on"><button class="link-button" type="submit">Approve + restock</button>
+            </form>
+            <form class="inline-form" method="post" action="{% url 'staff_ops:return_reject' rr.pk %}">
+              {% csrf_token %}<button class="link-button" type="submit">Reject</button>
+            </form>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6" class="empty">No return requests.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

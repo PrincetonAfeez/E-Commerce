@@ -1,0 +1,16 @@
+{% extends "shop/base.html" %}
+{% block title %}Create account · Aster Commerce{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <form class="form-panel" method="post">
+    {% csrf_token %}
+    <h1>Create your account</h1>
+    {{ form.as_p }}
+    <button class="button" type="submit">Sign up</button>
+    <p class="form-hint">By signing up you agree to our
+      <a href="{% url 'terms' %}">Terms of Service</a> and
+      <a href="{% url 'privacy' %}">Privacy Policy</a>.</p>
+  </form>
+  <p><a href="{% url 'login' %}">Already have an account? Log in</a></p>
+</section>
+{% endblock %}

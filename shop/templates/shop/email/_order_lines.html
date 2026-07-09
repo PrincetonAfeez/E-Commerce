@@ -1,0 +1,17 @@
+<table role="presentation" width="100%">
+  <thead><tr><th align="left">Item</th><th align="right">Qty</th><th align="right">Total</th></tr></thead>
+  <tbody>
+    {% for item in items %}
+      <tr>
+        <td>{{ item.product_name }} <small>({{ item.sku }})</small></td>
+        <td align="right">{{ item.quantity }}</td>
+        <td align="right">${{ item.line_total }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p>
+  Subtotal ${{ order.subtotal }} · Discount -${{ order.discount_total }} ·
+  Shipping ${{ order.shipping_total }} · Tax ${{ order.tax_total }}<br>
+  <strong>Total ${{ order.total }}</strong>
+</p>

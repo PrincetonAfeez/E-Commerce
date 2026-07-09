@@ -1,0 +1,32 @@
+{% extends "shop/base.html" %}
+{% block title %}{{ order.order_number }} · Aster Commerce{% endblock %}
+{% block content %}
+<section class="detail-layout">
+  <div>
+    <h1>{{ order.order_number }}</h1>
+    <p class="notice">{{ order.paid_status|title }} · ${{ order.total }}</p>
+    {% if order.user_id and order.refundable %}
+      <a class="button secondary" href="{% url 'orders:return' order.order_number %}">Request a return</a>
+    {% endif %}
+    <div class="line-list">
+      {% for item in order.items.all %}
+        <div class="line-item compact">
+          <div><strong>{{ item.product_name }}</strong><span>{{ item.variant_title }} · {{ item.sku }}</span></div>
+          <span>{{ item.quantity }} × ${{ item.unit_price }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+  <aside class="summary-panel">
+    <h2>Timeline</h2>
+    {% for event in order.status_events.all %}
+      <div class="timeline-item">
+        <strong>{{ event.event_type }}</strong>
+        <span>{{ event.created_at|date:"M j, g:i A" }}</span>
+      </div>
+    {% empty %}
+      <p class="empty">No events yet.</p>
+    {% endfor %}
+  </aside>
+</section>
+{% endblock %}
