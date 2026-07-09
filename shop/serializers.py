@@ -1,3 +1,4 @@
+# DRF serializers exposing catalog, cart, checkout, and order API representations
 from __future__ import annotations
 
 from rest_framework import serializers
