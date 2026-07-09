@@ -1,3 +1,4 @@
+# Request ID and tenant resolution middleware scoping ORM queries per storefront host
 from __future__ import annotations
 
 import uuid
