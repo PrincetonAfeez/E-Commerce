@@ -1,3 +1,4 @@
+# Charges and fulfils customer subscriptions whose next renewal date is due
 from django.core.management.base import BaseCommand
 
 from shop.services.subscriptions import generate_due_renewals
