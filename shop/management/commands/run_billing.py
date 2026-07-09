@@ -1,3 +1,4 @@
+# Issues this month simulated subscription invoice for each subscribed tenant
 from django.core.management.base import BaseCommand
 
 from shop.services.plans import run_billing_cycle
