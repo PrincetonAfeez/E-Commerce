@@ -1,3 +1,4 @@
+# Server-rendered views for storefront catalog, cart, checkout, accounts, and staff ops
 from __future__ import annotations
 
 import re
