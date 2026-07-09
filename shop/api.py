@@ -1,3 +1,4 @@
+# DRF API views with tenant-scoped permissions for catalog, cart, checkout, and staff ops
 from __future__ import annotations
 
 import json
