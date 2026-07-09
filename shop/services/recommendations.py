@@ -1,3 +1,4 @@
+# Also-bought product suggestions and session-based recently viewed tracking
 from __future__ import annotations
 
 from django.db.models import Count
