@@ -1,3 +1,4 @@
+# HMAC-signed webhook enqueue and delivery with retry for outbox domain events
 from __future__ import annotations
 
 import hashlib
