@@ -1,3 +1,4 @@
+# Django admin registrations and inlines for shop models with inventory and plan guards
 from django import forms
 from django.contrib import admin
 
