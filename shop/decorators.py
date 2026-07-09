@@ -1,3 +1,4 @@
+# tenant_staff_required decorator restricting views to current-tenant staff or superusers
 from __future__ import annotations
 
 import functools
