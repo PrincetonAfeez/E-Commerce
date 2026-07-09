@@ -1,3 +1,4 @@
+# Polls the simulated gateway to resolve stranded or abandoned payment attempts
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
