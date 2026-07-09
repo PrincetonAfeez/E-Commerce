@@ -1,3 +1,4 @@
+# Checkout orchestration: reserve stock, snapshots, credit holds, and order finalization
 from __future__ import annotations
 
 import logging
