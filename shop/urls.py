@@ -1,3 +1,4 @@
+# URL routes for storefront pages: catalog, cart, checkout, orders, reviews, and staff
 from django.urls import include, path
 
 from . import views
