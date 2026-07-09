@@ -1,3 +1,4 @@
+# Partial or full refunds with idempotency, optional restock, and gateway reversal
 from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
