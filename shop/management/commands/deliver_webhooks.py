@@ -1,3 +1,4 @@
+# Enqueues recent outbox events to webhook endpoints and delivers pending ones
 from django.core.management.base import BaseCommand
 
 from shop.services.webhooks import deliver_pending, scan_and_enqueue
