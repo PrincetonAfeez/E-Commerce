@@ -1,3 +1,4 @@
+# Coupon validation, auto-apply discounts, redemption, and order discount snapshots
 from __future__ import annotations
 
 from dataclasses import dataclass
