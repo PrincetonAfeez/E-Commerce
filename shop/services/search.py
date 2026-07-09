@@ -1,3 +1,4 @@
+# Product full-text search on Postgres with icontains fallback and category facets
 from __future__ import annotations
 
 from django.db import connection
