@@ -1,3 +1,4 @@
+# Data migration assigning existing rows to a default tenant
 from django.db import migrations
 
 # Tenant-scoped models that need their existing rows attached to the default tenant.
