@@ -1,3 +1,4 @@
+# DRF router and REST URL patterns for catalog, cart, checkout, and staff endpoints
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
