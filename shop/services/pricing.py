@@ -1,3 +1,4 @@
+# Effective variant pricing via customer groups and per-group price list entries
 from __future__ import annotations
 
 from decimal import Decimal
