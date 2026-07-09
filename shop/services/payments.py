@@ -1,3 +1,4 @@
+# Simulated payment gateway authorize/confirm, reconciliation, and stranded recovery
 from __future__ import annotations
 
 import uuid
