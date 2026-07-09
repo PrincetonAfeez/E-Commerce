@@ -1,3 +1,4 @@
+# Store credit and gift card balance, holds at checkout, and redemption spending
 from __future__ import annotations
 
 from decimal import Decimal
