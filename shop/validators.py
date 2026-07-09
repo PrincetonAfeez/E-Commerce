@@ -1,3 +1,4 @@
+# Image upload validator enforcing allowed extensions and max file size
 from __future__ import annotations
 
 import os
