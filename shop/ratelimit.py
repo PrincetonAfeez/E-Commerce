@@ -1,3 +1,4 @@
+# Cache-backed per-IP rate limit decorator for Django views outside DRF throttling
 from __future__ import annotations
 
 import functools
