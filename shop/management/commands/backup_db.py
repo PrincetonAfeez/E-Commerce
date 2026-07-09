@@ -1,3 +1,4 @@
+# Runs pg_dump to write a compressed Postgres logical backup to disk
 import os
 import subprocess  # noqa: S404 - invoked with a fixed argv, never a shell string
 from datetime import datetime, timezone
