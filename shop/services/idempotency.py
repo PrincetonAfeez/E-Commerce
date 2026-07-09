@@ -1,3 +1,4 @@
+# Idempotency record locking and replay for safe retried API mutations
 from __future__ import annotations
 
 import hashlib
