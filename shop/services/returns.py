@@ -1,3 +1,4 @@
+# Customer return requests with staff approve/reject and linked refund creation
 from __future__ import annotations
 
 from decimal import Decimal
