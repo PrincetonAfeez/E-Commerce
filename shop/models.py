@@ -1,3 +1,4 @@
+# Django ORM models for multi-tenant catalog, checkout, orders, billing, and webhooks
 from __future__ import annotations
 
 import uuid
