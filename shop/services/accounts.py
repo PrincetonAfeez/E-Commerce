@@ -1,3 +1,4 @@
+# GDPR user data export and account deletion scrubbing personal data from orders
 from __future__ import annotations
 
 from django.db import transaction
