@@ -1,3 +1,4 @@
+# Context-var tenant scoping, default tenant cache, and TenantManager queryset filter
 from __future__ import annotations
 
 import contextlib
