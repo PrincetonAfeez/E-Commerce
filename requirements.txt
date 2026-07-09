@@ -9,6 +9,6 @@ gunicorn>=23.0
 whitenoise>=6.6
 django-csp>=4.0
 django-cors-headers>=4.4
-sentry-sdk>=2.0
+sentry-sdk>=2.64.0
 pytest>=8.0
 pytest-django>=4.10
