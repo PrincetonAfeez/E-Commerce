@@ -1,17 +1,16 @@
-# Context-var tenant scoping, default tenant cache, and TenantManager queryset filter
+"""Context-var tenant scoping, default tenant cache, and TenantManager queryset filter"""
 from __future__ import annotations
 
 import contextlib
 import contextvars
 
-from django.db import models
+from django.conf import settings
+from django.db import IntegrityError, models, transaction
 
 # The active tenant for the current request/task. None means "no tenant context" —
 # queries are then UNFILTERED (admin, management commands, tests, shell), which keeps
 # the app backward-compatible with its single-tenant history.
-_current_tenant_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "current_tenant_id", default=None
-)
+_current_tenant_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("current_tenant_id", default=None)
 
 _default_tenant_id_cache: int | None = None
 
@@ -48,11 +47,15 @@ def default_tenant_id() -> int:
         return _default_tenant_id_cache
     from shop.models import Tenant
 
-    tenant = (
-        Tenant.objects.filter(slug="default").first() or Tenant.objects.order_by("id").first()
-    )
+    tenant = Tenant.objects.filter(slug="default").first() or Tenant.objects.order_by("id").first()
     if tenant is None:
-        tenant = Tenant.objects.create(name="Default Store", slug="default")
+        try:
+            with transaction.atomic():
+                tenant, _ = Tenant.objects.get_or_create(slug="default", defaults={"name": "Default Store"})
+        except IntegrityError:
+            tenant = Tenant.objects.filter(slug="default").first() or Tenant.objects.order_by("id").first()
+            if tenant is None:
+                raise
     _default_tenant_id_cache = tenant.pk
     return _default_tenant_id_cache
 
@@ -75,4 +78,9 @@ class TenantManager(models.Manager):
         tid = get_current_tenant_id()
         if tid is not None:
             return qs.filter(tenant_id=tid)
+        if getattr(settings, "REQUIRE_TENANT_CONTEXT", False):
+            from django.apps import apps
+
+            if apps.ready:
+                raise RuntimeError("Tenant context is required but not set.")
         return qs
