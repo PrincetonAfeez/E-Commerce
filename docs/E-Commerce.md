@@ -188,11 +188,11 @@ These behaviors are **tested** (concurrency + idempotency + crash-replay + expir
 - **Database:** PostgreSQL (dev + prod). No SQLite — the concurrency guarantees rely on real row-locking semantics.
 - **Background work:** a scheduled **reservation-expiry sweep** (release abandoned reservations) — cron'd management command, or Celery Beat if otherwise justified. (Real async payment confirmation would warrant a worker; the simulated gateway keeps it light.)
 - **File storage:** product images via local volume (dev) / object storage (prod).
-- **Containerization:** `Dockerfile` (slim base, non-root, collected static, Gunicorn) + `docker-compose.yml` (web + postgres) for dev.
+- **Containerization:** `Dockerfile` (slim base, non-root, collected static, Gunicorn) + `docker-compose.yml` (db, redis, web, worker, backup) for dev; `docker-compose.prod.yml` overlay for production profiles.
 - **Settings:** env-driven config split; `.env.example` committed; real `.env` git-ignored.
 - **Static:** WhiteNoise or host-native.
 - **Seed data:** a realistic catalog with variants and stock so checkout/concurrency are exercised against real data.
-- **Observability:** error tracking (e.g. Sentry), structured logging (incl. checkout lifecycle, reservation events, payment confirmations, status transitions), `/healthz` (200 + DB connectivity).
+- **Observability:** error tracking (e.g. Sentry), structured logging (incl. checkout lifecycle, reservation events, payment confirmations, status transitions), `/healthz` (200 when DB **and cache** are reachable; production returns 503 if cache is down).
 - **CI:** run formatting/linting, tests against PostgreSQL, migration checks, and basic security checks on every push/PR.
 - **Release discipline:** migrations are reviewed before deploy; deploy command runs collectstatic, migrations, and health checks in a predictable order.
 - **Backups/restore:** production posture includes managed Postgres backups and a documented restore check, even if the capstone deploy is small.
@@ -236,7 +236,7 @@ These behaviors are **tested** (concurrency + idempotency + crash-replay + expir
 10. Order lifecycle transitions are server-enforced (illegal transitions rejected) and audited; staff fulfill orders via custom views; catalog/stock managed via Django admin.
 11. The catalog + cart/order API mirrors the web with token auth, cursor pagination, OpenAPI docs, stable JSON errors, `Idempotency-Key`, and **identical** overselling/idempotency/money guarantees.
 12. Core database constraints exist and are tested: unique SKU, unique idempotency keys, nonnegative quantities, one order per checkout attempt, unique confirmed gateway reference, and active-reservation indexes.
-13. Security/production posture verifiable: `Decimal` money + server-side totals + price snapshots, `DEBUG=False`, secrets in env, HTTPS + secure cookies, CSRF, rate limits, unguessable guest tokens, owner-scoped orders, safe uploads, CORS/CSP posture, errors to Sentry, `/healthz` green.
+13. Security/production posture verifiable: `Decimal` money + server-side totals + price snapshots, `DEBUG=False`, secrets in env, HTTPS + secure cookies, CSRF, rate limits, unguessable guest tokens, owner-scoped orders, safe uploads, CORS/CSP posture, errors to Sentry, `/healthz` green (DB + cache in production).
 14. CI runs lint/format checks, migration checks, and tests against PostgreSQL; release/deploy and backup/restore expectations are documented.
 15. The payment gateway is swappable (Stripe could replace the simulator without touching the cart→order seam); `docker-compose up` runs web + postgres with seed catalog; the reservation sweep runs on schedule; no secret committed.
 
@@ -259,7 +259,7 @@ These behaviors are **tested** (concurrency + idempotency + crash-replay + expir
 13. First-class API (catalog + cart/order), token auth, cursor pagination, OpenAPI, stable errors, `Idempotency-Key`, **re-using the same seam/guarantees**; prove web/API parity on overselling + idempotency.
 14. Security pass: Decimal/price-snapshot audit, CSRF, rate limiting/throttling, HTTPS/cookies, guest-token + owner-scoping checks, safe uploads, CORS/CSP, secrets audit.
 15. CI/quality pass: pytest against Postgres, migration checks, lint/format, optional type checks.
-16. Observability: checkout/reservation/payment/status logging, Sentry, `/healthz`. Deploy (host + managed Postgres, TLS); walk the full Definition of Done.
+16. Observability: checkout/reservation/payment/status logging, Sentry, `/healthz` (DB + cache). Deploy (host + managed Postgres + Redis, TLS); walk the full Definition of Done.
 ---
 
 ## 14. Product Boundary & GTM Readiness
