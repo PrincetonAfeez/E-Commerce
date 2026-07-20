@@ -1,4 +1,4 @@
-# Checkout orchestration: reserve stock, snapshots, credit holds, and order finalization
+"""Checkout orchestration: reserve stock, snapshots, credit holds, and order finalization"""
 from __future__ import annotations
 
 import logging
@@ -27,7 +27,7 @@ from .exceptions import CartError, CheckoutStateError, InvalidCoupon, OutOfStock
 from .inventory import consume_reservations, release_reservations, reserve_for_attempt
 from .money import allocate_amount, clamp_money, quantize_money
 from .pricing import effective_price
-from .promotions import redeem_coupon_for_order
+from .promotions import redeem_promotions_for_order
 
 logger = logging.getLogger("shop.checkout")
 
@@ -42,6 +42,13 @@ REUSABLE_ATTEMPT_STATUSES = {
     CheckoutAttempt.Status.FINALIZED,
 }
 
+# Attempts safe to expire when a new checkout idempotency key is started on the same cart.
+# Never include payment-protected statuses (confirmed/finalized).
+EXPIRABLE_ATTEMPT_STATUSES = {
+    CheckoutAttempt.Status.STARTED,
+    CheckoutAttempt.Status.RESERVED,
+}
+
 
 def begin_checkout(
     cart: Cart,
@@ -53,7 +60,24 @@ def begin_checkout(
     expected_subtotal: Decimal | None = None,
     use_store_credit: bool = False,
 ) -> CheckoutAttempt:
-    existing = _reusable_attempt(cart, idempotency_key)
+    if cart.user_id:
+        from shop.models import AccountProfile
+
+        profile, _ = AccountProfile.objects.get_or_create(user_id=cart.user_id)
+        if not profile.email_verified:
+            raise CheckoutStateError(
+                "Verify your email before checkout.",
+                code="email_not_verified",
+            )
+
+    existing = _reusable_attempt(
+        cart,
+        idempotency_key,
+        use_store_credit=use_store_credit,
+        shipping=shipping,
+        shipping_method=shipping_method,
+        contact=contact,
+    )
     if existing:
         return existing
 
@@ -66,18 +90,18 @@ def begin_checkout(
             locked_cart = Cart.objects.select_for_update().get(pk=cart.pk)
             if locked_cart.status != Cart.Status.ACTIVE:
                 raise CartError("Cart is not active.")
-            items = list(
-                locked_cart.items.select_related("variant", "variant__product").order_by("variant_id")
-            )
+            _expire_other_active_attempts(locked_cart, exclude_key=idempotency_key)
+            items = list(locked_cart.items.select_related("variant", "variant__product").order_by("variant_id"))
             if not items:
                 raise CartError("Cart is empty.")
 
-            refresh_cart_coupon(locked_cart)
+            refresh_cart_coupon(locked_cart, guest_email=contact.get("email", ""))
             totals = recalculate_cart(
                 locked_cart,
                 shipping_method=shipping_method,
                 region=(shipping or {}).get("region", ""),
                 country=(shipping or {}).get("country", "US"),
+                guest_email=contact.get("email", ""),
             )
             drift_message = _price_drift_message(expected_subtotal, totals.subtotal)
             price_drift_message = " ".join(part for part in [locked_cart.warning, drift_message] if part)
@@ -144,15 +168,66 @@ def begin_checkout(
     except IntegrityError:
         # A concurrent request with the same (cart, idempotency_key) won the unique
         # constraint race. Return the winner's attempt instead of erroring (spec §21).
-        existing = _reusable_attempt(cart, idempotency_key)
+        existing = _reusable_attempt(
+            cart,
+            idempotency_key,
+            use_store_credit=use_store_credit,
+            shipping=shipping,
+            shipping_method=shipping_method,
+            contact=contact,
+        )
         if existing:
             return existing
         raise
 
 
-def _reusable_attempt(cart: Cart, idempotency_key: str) -> CheckoutAttempt | None:
+def _expire_attempts_for_cart(
+    cart: Cart,
+    *,
+    statuses: set[str] | None = None,
+    exclude_key: str | None = None,
+) -> None:
+    """Expire in-flight checkout attempts and release stock/credit holds (locked, conditional)."""
+    statuses = statuses or EXPIRABLE_ATTEMPT_STATUSES
+    with transaction.atomic():
+        queryset = CheckoutAttempt.objects.select_for_update().filter(cart=cart, status__in=statuses)
+        if exclude_key:
+            queryset = queryset.exclude(idempotency_key=exclude_key)
+        stale_ids = list(queryset.values_list("pk", flat=True))
+        for pk in stale_ids:
+            locked = CheckoutAttempt.objects.select_for_update().get(pk=pk)
+            if locked.status not in statuses:
+                continue
+            release_reservations(locked)
+            release_hold(locked)
+            CheckoutAttempt.objects.filter(pk=pk, status__in=statuses).update(
+                status=CheckoutAttempt.Status.EXPIRED,
+            )
+
+
+def _expire_other_active_attempts(cart: Cart, *, exclude_key: str) -> None:
+    """Expire prior in-flight checkout attempts so a new idempotency key cannot double-reserve."""
+    _expire_attempts_for_cart(cart, exclude_key=exclude_key)
+
+
+def _reusable_attempt(
+    cart: Cart,
+    idempotency_key: str,
+    *,
+    use_store_credit: bool = False,
+    shipping: dict | None = None,
+    shipping_method: str = "Standard",
+    contact: dict | None = None,
+) -> CheckoutAttempt | None:
     existing = CheckoutAttempt.objects.filter(cart=cart, idempotency_key=idempotency_key).first()
     if existing and existing.status in REUSABLE_ATTEMPT_STATUSES:
+        _validate_reused_attempt(
+            existing,
+            use_store_credit=use_store_credit,
+            shipping=shipping or {},
+            shipping_method=shipping_method,
+            contact=contact or {},
+        )
         return existing
     if existing:
         raise CheckoutStateError(
@@ -160,6 +235,54 @@ def _reusable_attempt(cart: Cart, idempotency_key: str) -> CheckoutAttempt | Non
             code="checkout_attempt_terminal",
         )
     return None
+
+
+def _validate_reused_attempt(
+    attempt: CheckoutAttempt,
+    *,
+    use_store_credit: bool,
+    shipping: dict,
+    shipping_method: str,
+    contact: dict,
+) -> None:
+    if use_store_credit != (attempt.credit_applied > 0):
+        raise CheckoutStateError(
+            "Checkout options do not match the existing attempt (store credit).",
+            code="checkout_attempt_mismatch",
+        )
+    if attempt.selected_shipping_method != shipping_method:
+        raise CheckoutStateError(
+            "Shipping options do not match the existing checkout attempt.",
+            code="checkout_attempt_mismatch",
+        )
+    if shipping.get("region", "") != attempt.shipping_region:
+        raise CheckoutStateError(
+            "Shipping options do not match the existing checkout attempt.",
+            code="checkout_attempt_mismatch",
+        )
+    if shipping.get("country", "US") != attempt.shipping_country:
+        raise CheckoutStateError(
+            "Shipping options do not match the existing checkout attempt.",
+            code="checkout_attempt_mismatch",
+        )
+    for field, attr in (
+        ("name", "shipping_name"),
+        ("address1", "shipping_address1"),
+        ("address2", "shipping_address2"),
+        ("city", "shipping_city"),
+        ("postal_code", "shipping_postal_code"),
+    ):
+        if shipping.get(field, "") != getattr(attempt, attr, ""):
+            raise CheckoutStateError(
+                "Shipping address does not match the existing checkout attempt.",
+                code="checkout_attempt_mismatch",
+            )
+    contact_email = (contact.get("email") or "").strip().lower()
+    if contact_email and contact_email != (attempt.guest_email or "").strip().lower():
+        raise CheckoutStateError(
+            "Contact email does not match the existing checkout attempt.",
+            code="checkout_attempt_mismatch",
+        )
 
 
 def _price_drift_message(expected_subtotal: Decimal | None, actual_subtotal: Decimal) -> str:
@@ -176,52 +299,48 @@ def _price_drift_message(expected_subtotal: Decimal | None, actual_subtotal: Dec
 
 
 def _order_from_attempt(attempt: CheckoutAttempt) -> Order | None:
-    if attempt.order_id:
-        return attempt.order
-    order = Order.objects.filter(checkout_attempt=attempt).first()
-    if order:
-        CheckoutAttempt.objects.filter(pk=attempt.pk).update(
-            order=order,
-            status=CheckoutAttempt.Status.FINALIZED,
-        )
-    return order
+    return Order.objects.filter(checkout_attempt=attempt).first()
 
 
 def _mark_compensation_required(payment_id: int, message: str) -> None:
     attempt_id = None
-    with transaction.atomic():
-        payment = Payment.objects.select_for_update().get(pk=payment_id)
-        attempt = CheckoutAttempt.objects.select_for_update().get(pk=payment.checkout_attempt_id)
-        attempt_id = attempt.pk
-        payment.status = Payment.Status.REQUIRES_REFUND
-        payment.failure_code = "stock_unavailable_after_payment"
-        payment.save(update_fields=["status", "failure_code", "updated_at"])
-        attempt.status = CheckoutAttempt.Status.FAILED
-        attempt.save(update_fields=["status", "updated_at"])
-        AuditLog.objects.create(
-            actor=attempt.user,
-            action="checkout.compensation_required",
-            object_type="CheckoutAttempt",
-            object_id=str(attempt.pk),
-            metadata={"payment_id": payment.pk, "message": message},
-        )
-        OutboxEvent.objects.create(
-            event_type="payment.auto_refund_required",
-            aggregate_type="Payment",
-            aggregate_id=str(payment.pk),
-            payload={"checkout_attempt_id": attempt.pk, "message": message},
-        )
-    if attempt_id:
-        released_attempt = CheckoutAttempt.objects.get(pk=attempt_id)
-        release_reservations(released_attempt)
-        release_hold(released_attempt)
+    committed = False
+    try:
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().get(pk=payment_id)
+            attempt = CheckoutAttempt.objects.select_for_update().get(pk=payment.checkout_attempt_id)
+            attempt_id = attempt.pk
+            payment.status = Payment.Status.REQUIRES_REFUND
+            payment.failure_code = "stock_unavailable_after_payment"
+            payment.save(update_fields=["status", "failure_code", "updated_at"])
+            attempt.status = CheckoutAttempt.Status.FAILED
+            attempt.save(update_fields=["status", "updated_at"])
+            AuditLog.objects.create(
+                actor=attempt.user,
+                action="checkout.compensation_required",
+                object_type="CheckoutAttempt",
+                object_id=str(attempt.pk),
+                metadata={"payment_id": payment.pk, "message": message},
+            )
+            OutboxEvent.objects.create(
+                event_type="payment.auto_refund_required",
+                aggregate_type="Payment",
+                aggregate_id=str(payment.pk),
+                payload={"checkout_attempt_id": attempt.pk, "message": message},
+            )
+        committed = True
+    finally:
+        if committed and attempt_id:
+            released_attempt = CheckoutAttempt.objects.get(pk=attempt_id)
+            release_reservations(released_attempt)
+            release_hold(released_attempt)
 
 
 def finalize_confirmed_payment(payment: Payment) -> Order:
     try:
         return _finalize_confirmed_payment(payment)
     except (OutOfStock, InvalidCoupon) as exc:
-        _mark_compensation_required(payment.pk, exc.message)
+        _mark_compensation_required(payment.pk, str(exc))
         raise CheckoutStateError(
             "Payment is confirmed, but finalization failed. An automatic refund is required.",
             code="compensation_required",
@@ -301,7 +420,7 @@ def _finalize_confirmed_payment(payment: Payment) -> Order:
                 line_total=line_total,
             )
 
-        redeem_coupon_for_order(order)
+        redeem_promotions_for_order(order)
         consume_reservations(attempt, order)
         spend_hold(attempt, order)
         from .subscriptions import activate_subscriptions_for_order
@@ -313,15 +432,18 @@ def _finalize_confirmed_payment(payment: Payment) -> Order:
         locked_payment.save(update_fields=["order", "status", "updated_at"])
 
         attempt.status = CheckoutAttempt.Status.FINALIZED
-        attempt.order = order
-        attempt.save(update_fields=["status", "order", "updated_at"])
+        attempt.save(update_fields=["status", "updated_at"])
         clear_cart(attempt.cart)
 
         Fulfillment.objects.create(order=order)
         logger.info(
             "order.finalized",
-            extra={"event": "order.finalized", "order_number": order.order_number,
-                   "checkout_attempt_id": attempt.pk, "payment_id": locked_payment.pk},
+            extra={
+                "event": "order.finalized",
+                "order_number": order.order_number,
+                "checkout_attempt_id": attempt.pk,
+                "payment_id": locked_payment.pk,
+            },
         )
         OrderStatusEvent.objects.create(
             order=order,

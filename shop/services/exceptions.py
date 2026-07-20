@@ -1,4 +1,4 @@
-# Typed CommerceError hierarchy for cart, checkout, payment, and plan limit failures
+"""Typed CommerceError hierarchy for cart, checkout, payment, and plan limit failures"""
 class CommerceError(Exception):
     code = "commerce_error"
 
@@ -42,6 +42,10 @@ class PermissionDenied(CommerceError):
 
 class IdempotencyInProgress(CommerceError):
     code = "idempotency_in_progress"
+
+
+class IdempotencyKeyReuseMismatch(CommerceError):
+    code = "idempotency_key_reuse_mismatch"
 
 
 class GiftCardError(CommerceError):

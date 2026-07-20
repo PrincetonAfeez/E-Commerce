@@ -1,5 +1,7 @@
-# Stock availability, reservations, consumption, expiry, and manual adjustments
+"""Stock availability, reservations, consumption, expiry, and manual adjustments"""
 from __future__ import annotations
+
+import logging
 
 from django.db import transaction
 from django.db.models import F, Q, Sum
@@ -15,6 +17,8 @@ PAYMENT_PROTECTED_STATUSES = {
     CheckoutAttempt.Status.PAYMENT_CONFIRMED,
     CheckoutAttempt.Status.FINALIZED,
 }
+
+logger = logging.getLogger("shop.inventory")
 
 
 def variants_with_availability(queryset=None):
@@ -90,36 +94,42 @@ def release_reservations(attempt: CheckoutAttempt, *, status: str = Reservation.
 
 
 def consume_reservations(attempt: CheckoutAttempt, order) -> None:
-    reservations = (
-        Reservation.objects.select_for_update()
-        .select_related("variant")
-        .filter(checkout_attempt=attempt, status=Reservation.Status.ACTIVE)
-        .order_by("variant_id")
-    )
-    if not reservations.exists():
-        raise OutOfStock("No active reservations exist for this checkout attempt.")
+    with transaction.atomic():
+        reservations = (
+            Reservation.objects.select_for_update()
+            .select_related("variant")
+            .filter(checkout_attempt=attempt, status=Reservation.Status.ACTIVE)
+            .order_by("variant_id")
+        )
+        if not reservations.exists():
+            raise OutOfStock("No active reservations exist for this checkout attempt.")
 
-    for reservation in reservations:
-        variant = ProductVariant.objects.select_for_update().get(pk=reservation.variant_id)
-        if variant.quantity < reservation.quantity:
-            raise OutOfStock(
-                f"{variant.sku} has insufficient physical stock for finalization.",
-                field_errors={"variant": variant.sku, "available": variant.quantity},
+        for reservation in reservations:
+            variant = ProductVariant.objects.select_for_update().get(pk=reservation.variant_id)
+            if variant.quantity < reservation.quantity:
+                raise OutOfStock(
+                    f"{variant.sku} has insufficient physical stock for finalization.",
+                    field_errors={"variant": variant.sku, "available": variant.quantity},
+                )
+            rows_updated = ProductVariant.objects.filter(pk=variant.pk, quantity__gte=reservation.quantity).update(
+                quantity=F("quantity") - reservation.quantity
             )
-        ProductVariant.objects.filter(pk=variant.pk, quantity__gte=reservation.quantity).update(
-            quantity=F("quantity") - reservation.quantity
-        )
-        reservation.status = Reservation.Status.CONSUMED
-        reservation.released_at = timezone.now()
-        reservation.save(update_fields=["status", "released_at", "updated_at"])
-        InventoryMovement.objects.create(
-            variant=variant,
-            quantity_delta=-reservation.quantity,
-            reason=InventoryMovement.Reason.RESERVATION_CONSUMED,
-            reservation=reservation,
-            order=order,
-            note=f"Checkout attempt {attempt.pk} finalized",
-        )
+            if rows_updated != 1:
+                raise OutOfStock(
+                    f"{variant.sku} has insufficient physical stock for finalization.",
+                    field_errors={"variant": variant.sku, "available": variant.quantity},
+                )
+            reservation.status = Reservation.Status.CONSUMED
+            reservation.released_at = timezone.now()
+            reservation.save(update_fields=["status", "released_at", "updated_at"])
+            InventoryMovement.objects.create(
+                variant=variant,
+                quantity_delta=-reservation.quantity,
+                reason=InventoryMovement.Reason.RESERVATION_CONSUMED,
+                reservation=reservation,
+                order=order,
+                note=f"Checkout attempt {attempt.pk} finalized",
+            )
 
 
 def expire_reservations(*, now=None) -> int:
@@ -144,12 +154,14 @@ def expire_reservations(*, now=None) -> int:
             id__in=attempt_ids,
             status__in=[CheckoutAttempt.Status.STARTED, CheckoutAttempt.Status.RESERVED],
         ).update(status=CheckoutAttempt.Status.EXPIRED)
-    # Return any held store credit for expired attempts (outside the sweep transaction).
-    if expired_ids:
-        from .credit import release_hold
+        if expired_ids:
+            from .credit import release_hold
 
-        for attempt in CheckoutAttempt.objects.filter(id__in=expired_ids):
-            release_hold(attempt)
+            for attempt in CheckoutAttempt.objects.select_for_update().filter(id__in=expired_ids):
+                try:
+                    release_hold(attempt)
+                except Exception:
+                    logger.exception("Failed to release credit hold for attempt %s", attempt.pk)
     return count
 
 

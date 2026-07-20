@@ -1,13 +1,13 @@
-# Cart lifecycle: get/create, add/update items, coupons, and total recalculation
+"""Cart lifecycle: get/create, add/update items, coupons, and total recalculation"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import HttpRequest
 
-from shop.models import Cart, CartItem, CouponCode, ProductVariant
+from shop.models import Cart, CartItem, CheckoutAttempt, CouponCode, ProductVariant
 
 from .calculators import shipping_calculator, tax_calculator
 from .exceptions import CartError, InvalidCoupon, OutOfStock
@@ -37,29 +37,47 @@ def ensure_session_key(request: HttpRequest) -> str:
 
 def get_or_create_cart_for_request(request: HttpRequest) -> Cart:
     session_key = ensure_session_key(request)
-    guest_cart = Cart.objects.filter(
-        user__isnull=True,
-        session_key=session_key,
-        status=Cart.Status.ACTIVE,
-    ).first()
-
-    if request.user.is_authenticated:
-        user_cart, _ = Cart.objects.get_or_create(
-            user=request.user,
+    with transaction.atomic():
+        guest_cart = Cart.objects.filter(
+            user__isnull=True,
+            session_key=session_key,
             status=Cart.Status.ACTIVE,
-            defaults={"session_key": ""},
-        )
-        if guest_cart and guest_cart.pk != user_cart.pk:
-            merge_guest_cart(guest_cart, user_cart)
-        return user_cart
+        ).first()
 
-    cart, _ = Cart.objects.get_or_create(
-        user=None,
-        session_key=session_key,
-        status=Cart.Status.ACTIVE,
-        defaults={},
-    )
-    return cart
+        if request.user.is_authenticated:
+            try:
+                user_cart, _ = Cart.objects.get_or_create(
+                    user=request.user,
+                    status=Cart.Status.ACTIVE,
+                    defaults={"session_key": ""},
+                )
+            except IntegrityError:
+                user_cart = Cart.objects.filter(
+                    user=request.user,
+                    status=Cart.Status.ACTIVE,
+                ).first()
+                if user_cart is None:
+                    raise
+            if guest_cart and guest_cart.pk != user_cart.pk:
+                merge_guest_cart(guest_cart, user_cart)
+            return user_cart
+
+        try:
+            cart, _ = Cart.objects.get_or_create(
+                user=None,
+                session_key=session_key,
+                status=Cart.Status.ACTIVE,
+                defaults={},
+            )
+        except IntegrityError:
+            cart = Cart.objects.filter(
+                user=None,
+                session_key=session_key,
+                status=Cart.Status.ACTIVE,
+            ).first()
+            if cart is None:
+                raise
+        return cart
 
 
 def subtotal_for_cart(cart: Cart) -> Decimal:
@@ -69,14 +87,20 @@ def subtotal_for_cart(cart: Cart) -> Decimal:
     return quantize_money(subtotal)
 
 
-def refresh_cart_coupon(cart: Cart) -> None:
+def refresh_cart_coupon(cart: Cart, *, guest_email: str = "") -> None:
     """Persist removal of a coupon that is no longer valid (mutation path only)."""
     if not cart.coupon_code_id:
         return
     subtotal = subtotal_for_cart(cart)
     shipping_quote = shipping_calculator.quote(subtotal)
     try:
-        validate_coupon(cart.coupon_code, subtotal, user=cart.user, shipping_total=shipping_quote.amount)
+        validate_coupon(
+            cart.coupon_code,
+            subtotal,
+            user=cart.user,
+            guest_email=guest_email,
+            shipping_total=shipping_quote.amount,
+        )
     except InvalidCoupon:
         cart.coupon_code = None
         cart.warning = "Coupon was removed because it is no longer valid."
@@ -84,7 +108,12 @@ def refresh_cart_coupon(cart: Cart) -> None:
 
 
 def recalculate_cart(
-    cart: Cart, *, shipping_method: str = "Standard", region: str = "", country: str = "US"
+    cart: Cart,
+    *,
+    shipping_method: str = "Standard",
+    region: str = "",
+    country: str = "US",
+    guest_email: str = "",
 ) -> CartTotals:
     subtotal = subtotal_for_cart(cart)
     shipping_quote = shipping_calculator.quote(subtotal, method=shipping_method)
@@ -99,6 +128,7 @@ def recalculate_cart(
                 coupon,
                 subtotal,
                 user=cart.user,
+                guest_email=guest_email,
                 shipping_total=shipping_quote.amount,
             )
             discount_total = coupon_quote.discount_total
@@ -114,7 +144,12 @@ def recalculate_cart(
 
     if not coupon:
         # No coupon applied — apply the best eligible automatic (no-code) promotion.
-        auto = best_auto_discount(subtotal, shipping_total=shipping_quote.amount)
+        auto = best_auto_discount(
+            subtotal,
+            user=cart.user,
+            guest_email=guest_email,
+            shipping_total=shipping_quote.amount,
+        )
         if auto:
             discount_total = auto.discount_total
             discount_label = auto.label
@@ -160,9 +195,7 @@ def add_item(cart: Cart, variant: ProductVariant, quantity: int = 1) -> CartItem
             item.quantity = desired_quantity
             item.save(update_fields=["quantity", "updated_at"])
         else:
-            item = CartItem.objects.create(
-                cart=locked_cart, variant=locked_variant, quantity=desired_quantity
-            )
+            item = CartItem.objects.create(cart=locked_cart, variant=locked_variant, quantity=desired_quantity)
         return item
 
 
@@ -194,30 +227,40 @@ def set_item_quantity(cart: Cart, variant: ProductVariant, quantity: int) -> Car
 
 
 def remove_item(cart: Cart, variant: ProductVariant) -> None:
-    CartItem.objects.filter(cart=cart, variant=variant).delete()
+    with transaction.atomic():
+        Cart.objects.select_for_update().get(pk=cart.pk)
+        CartItem.objects.filter(cart=cart, variant=variant).delete()
 
 
 def apply_coupon(cart: Cart, code: str) -> CartTotals:
     coupon = get_coupon_by_code(code)
-    subtotal = subtotal_for_cart(cart)
-    shipping_quote = shipping_calculator.quote(subtotal)
-    validate_coupon(coupon, subtotal, user=cart.user, shipping_total=shipping_quote.amount)
-    cart.coupon_code = coupon
-    cart.warning = ""
-    cart.save(update_fields=["coupon_code", "warning", "updated_at"])
+    with transaction.atomic():
+        locked_cart = Cart.objects.select_for_update().get(pk=cart.pk)
+        subtotal = subtotal_for_cart(locked_cart)
+        shipping_quote = shipping_calculator.quote(subtotal)
+        validate_coupon(coupon, subtotal, user=locked_cart.user, shipping_total=shipping_quote.amount)
+        locked_cart.coupon_code = coupon
+        locked_cart.warning = ""
+        locked_cart.save(update_fields=["coupon_code", "warning", "updated_at"])
+        cart.coupon_code = coupon
     return recalculate_cart(cart)
 
 
 def remove_coupon(cart: Cart) -> CartTotals:
-    cart.coupon_code = None
-    cart.save(update_fields=["coupon_code", "updated_at"])
+    with transaction.atomic():
+        locked_cart = Cart.objects.select_for_update().get(pk=cart.pk)
+        locked_cart.coupon_code = None
+        locked_cart.save(update_fields=["coupon_code", "updated_at"])
+        cart.coupon_code = None
     return recalculate_cart(cart)
 
 
 def clear_cart(cart: Cart) -> None:
-    cart.items.all().delete()
-    cart.status = Cart.Status.ORDERED
-    cart.save(update_fields=["status", "updated_at"])
+    with transaction.atomic():
+        locked = Cart.objects.select_for_update().get(pk=cart.pk)
+        locked.items.all().delete()
+        locked.status = Cart.Status.ORDERED
+        locked.save(update_fields=["status", "updated_at"])
 
 
 def merge_guest_cart(guest_cart: Cart, user_cart: Cart) -> Cart:
@@ -225,11 +268,19 @@ def merge_guest_cart(guest_cart: Cart, user_cart: Cart) -> Cart:
     with transaction.atomic():
         locked_guest = Cart.objects.select_for_update().get(pk=guest_cart.pk)
         locked_user = Cart.objects.select_for_update().get(pk=user_cart.pk)
+        from .checkout import _expire_attempts_for_cart
+
+        _expire_attempts_for_cart(
+            locked_guest,
+            statuses={
+                CheckoutAttempt.Status.STARTED,
+                CheckoutAttempt.Status.RESERVED,
+                CheckoutAttempt.Status.PAYMENT_PENDING,
+            },
+        )
         for guest_item in locked_guest.items.select_related("variant").order_by("variant_id"):
             variant = ProductVariant.objects.select_for_update().get(pk=guest_item.variant_id)
-            user_item = (
-                CartItem.objects.select_for_update().filter(cart=locked_user, variant=variant).first()
-            )
+            user_item = CartItem.objects.select_for_update().filter(cart=locked_user, variant=variant).first()
             current = user_item.quantity if user_item else 0
             requested = current + guest_item.quantity
             capped = min(requested, available_to_sell(variant))
@@ -245,7 +296,18 @@ def merge_guest_cart(guest_cart: Cart, user_cart: Cart) -> Cart:
                 CartItem.objects.create(cart=locked_user, variant=variant, quantity=capped)
 
         if locked_guest.coupon_code_id and not locked_user.coupon_code_id:
-            locked_user.coupon_code = locked_guest.coupon_code
+            try:
+                subtotal = subtotal_for_cart(locked_user)
+                shipping_quote = shipping_calculator.quote(subtotal)
+                validate_coupon(
+                    locked_guest.coupon_code,
+                    subtotal,
+                    user=locked_user.user,
+                    shipping_total=shipping_quote.amount,
+                )
+                locked_user.coupon_code = locked_guest.coupon_code
+            except InvalidCoupon:
+                warning_parts.append("Guest coupon was not valid for your account and was not merged.")
 
         locked_user.warning = " ".join(warning_parts)
         locked_user.save(update_fields=["coupon_code", "warning", "updated_at"])

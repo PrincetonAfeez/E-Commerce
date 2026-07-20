@@ -1,4 +1,4 @@
-# Staff dashboard metrics: revenue, AOV, daily series, email and outbox health
+"""Staff dashboard metrics: revenue, AOV, daily series, email and outbox health"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -9,6 +9,9 @@ from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
 
 from shop.models import EmailDelivery, Order, OrderItem, OutboxEvent, ProductVariant, Reservation
+from shop.tenancy import get_current_tenant_id
+
+from .exceptions import CommerceError
 
 _ZERO = Decimal("0.00")
 
@@ -18,12 +21,14 @@ def _money_sum(qs, field):
 
 
 def dashboard_metrics(*, days: int = 14) -> dict:
+    if get_current_tenant_id() is None:
+        raise CommerceError("Tenant context is required for dashboard metrics.")
     now = timezone.now()
     since = now - timedelta(days=days)
 
     non_cancelled = Order.objects.exclude(status=Order.Status.CANCELLED)
     gross = _money_sum(non_cancelled, "total")
-    refunds = _money_sum(Order.objects.all(), "refund_total")
+    refunds = _money_sum(non_cancelled, "refund_total")
     net = gross - refunds
     paid_count = non_cancelled.count()
     aov = (net / paid_count).quantize(Decimal("0.01")) if paid_count else _ZERO
@@ -37,13 +42,10 @@ def dashboard_metrics(*, days: int = 14) -> dict:
         .order_by("day")
     )
     series = [
-        {"day": row["day"].isoformat(), "orders": row["orders"], "revenue": str(row["revenue"])}
-        for row in per_day
+        {"day": row["day"].isoformat(), "orders": row["orders"], "revenue": str(row["revenue"])} for row in per_day
     ]
 
-    status_counts = dict(
-        Order.objects.values_list("status").annotate(n=Count("id")).values_list("status", "n")
-    )
+    status_counts = dict(Order.objects.values_list("status").annotate(n=Count("id")).values_list("status", "n"))
 
     top_products = list(
         OrderItem.objects.values("product_name", "sku")

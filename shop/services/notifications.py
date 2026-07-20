@@ -1,12 +1,14 @@
-# Transactional email rendering and delivery logged via EmailDelivery records
+"""Transactional email rendering and delivery logged via EmailDelivery records"""
 from __future__ import annotations
 
 import hashlib
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
+from django.db import transaction
 from django.template.loader import render_to_string
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import strip_tags
 
 from shop.models import EmailDelivery, Order
@@ -62,11 +64,14 @@ def deliver_outbox_event(event) -> EmailDelivery | None:
     spec = EMAIL_EVENTS.get(event.event_type)
     if spec is None:
         return None
-    from shop.tenancy import set_current_tenant
+    from shop.tenancy import tenant_context
 
-    # Scope to the event's store so settings/links resolve to the right storefront.
-    set_current_tenant(event.tenant_id)
     subject, template = spec
+    with tenant_context(event.tenant_id):
+        return _deliver_outbox_event_inner(event, subject=subject, template=template)
+
+
+def _deliver_outbox_event_inner(event, *, subject: str, template: str) -> EmailDelivery | None:
     payload = event.payload or {}
 
     order = None
@@ -76,7 +81,12 @@ def deliver_outbox_event(event) -> EmailDelivery | None:
     if event.event_type == "cart.recovery_email" and recipient:
         from django.core import signing
 
-        token = signing.dumps(recipient, salt="unsubscribe")
+        from shop.tenancy import get_current_tenant_id
+
+        token = signing.dumps(
+            {"email": recipient, "tenant_id": get_current_tenant_id()},
+            salt="unsubscribe",
+        )
         context["unsubscribe_url"] = f"{site_url()}{reverse('unsubscribe', args=[token])}"
     if event.aggregate_type == "Order":
         order = Order.objects.filter(pk=event.aggregate_id).prefetch_related("items").first()
@@ -84,37 +94,69 @@ def deliver_outbox_event(event) -> EmailDelivery | None:
             recipient = order.guest_email or (order.user.email if order.user_id else "")
             context.update(_order_context(order))
 
-    # Idempotent: one delivery row per (outbox_event, template).
-    delivery, created = EmailDelivery.objects.get_or_create(
-        outbox_event=event,
-        template=event.event_type,
-        defaults={
-            "order": order,
-            "to_email_hash": _hash_email(recipient),
-            "status": EmailDelivery.Status.QUEUED,
-        },
-    )
-    if delivery.status == EmailDelivery.Status.SENT:
-        return delivery
+    with transaction.atomic():
+        delivery, _created = EmailDelivery.objects.get_or_create(
+            outbox_event=event,
+            template=event.event_type,
+            defaults={
+                "order": order,
+                "to_email_hash": _hash_email(recipient),
+                "status": EmailDelivery.Status.QUEUED,
+            },
+        )
+        if delivery.status == EmailDelivery.Status.SENT:
+            return delivery
+        delivery = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+        if delivery.status == EmailDelivery.Status.SENT:
+            return delivery
+        delivery.status = EmailDelivery.Status.SENDING
+        delivery.save(update_fields=["status", "updated_at"])
 
     if not recipient:
-        delivery.status = EmailDelivery.Status.FAILED
-        delivery.error = "No recipient email on record."
-        delivery.save(update_fields=["status", "error", "updated_at"])
+        with transaction.atomic():
+            delivery = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+            delivery.status = EmailDelivery.Status.FAILED
+            delivery.error = "No recipient email on record."
+            delivery.save(update_fields=["status", "error", "updated_at"])
         return delivery
 
     html = render_to_string(f"shop/email/{template}.html", context)
     text = strip_tags(html)
     message = EmailMultiAlternatives(subject=subject, body=text, to=[recipient])
     message.attach_alternative(html, "text/html")
-    message.send()  # raises on hard failure -> outbox retries
+    delivery.refresh_from_db()
+    send_nonce = f"event:{event.pk}"
+    if delivery.error == f"sent:{send_nonce}":
+        with transaction.atomic():
+            locked = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+            if locked.status != EmailDelivery.Status.SENT:
+                locked.status = EmailDelivery.Status.SENT
+                locked.sent_at = timezone.now()
+                locked.error = ""
+                locked.save(update_fields=["status", "sent_at", "error", "updated_at"])
+        return delivery
+    with transaction.atomic():
+        delivery = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+        delivery.error = f"sent:{send_nonce}"
+        delivery.save(update_fields=["error", "updated_at"])
+    try:
+        message.send()
+    except Exception:
+        with transaction.atomic():
+            delivery = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+            delivery.error = f"failed:{send_nonce}"
+            delivery.status = EmailDelivery.Status.QUEUED
+            delivery.save(update_fields=["error", "status", "updated_at"])
+        raise
 
-    from django.utils import timezone
-
-    delivery.status = EmailDelivery.Status.SENT
-    delivery.sent_at = timezone.now()
-    delivery.error = ""
-    delivery.save(update_fields=["status", "sent_at", "error", "updated_at"])
+    with transaction.atomic():
+        delivery = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+        if delivery.status == EmailDelivery.Status.SENT:
+            return delivery
+        delivery.status = EmailDelivery.Status.SENT
+        delivery.sent_at = timezone.now()
+        delivery.error = f"sent:{send_nonce}"
+        delivery.save(update_fields=["status", "sent_at", "error", "updated_at"])
     return delivery
 
 

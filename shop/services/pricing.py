@@ -1,9 +1,9 @@
-# Effective variant pricing via customer groups and per-group price list entries
+"""Effective variant pricing via customer groups and per-group price list entries"""
 from __future__ import annotations
 
 from decimal import Decimal
 
-from shop.models import AccountProfile, PriceListEntry
+from shop.models import PriceListEntry, TenantCustomerProfile
 from shop.tenancy import get_current_tenant_id
 
 from .money import quantize_money
@@ -12,15 +12,14 @@ from .money import quantize_money
 def _user_group(user):
     if not getattr(user, "is_authenticated", False):
         return None
-    profile = (
-        AccountProfile.objects.filter(user=user).select_related("customer_group").first()
-    )
-    group = profile.customer_group if profile else None
-    if group is None:
-        return None
-    # Only honour a group that belongs to the store currently being shopped.
     tid = get_current_tenant_id()
-    if tid is not None and group.tenant_id != tid:
+    if tid is None:
+        raise RuntimeError("Tenant context is required for customer-group pricing.")
+    profile = TenantCustomerProfile.objects.filter(user=user, tenant_id=tid).select_related("customer_group").first()
+    if not profile or not profile.customer_group_id:
+        return None
+    group = profile.customer_group
+    if group.tenant_id != tid:
         return None
     return group
 

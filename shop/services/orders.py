@@ -1,4 +1,4 @@
-# Order fulfillment transitions, cancellation, and status event outbox publishing
+"""Order fulfillment transitions, cancellation, and status event outbox publishing"""
 from __future__ import annotations
 
 from django.db import transaction
@@ -29,9 +29,7 @@ def transition_fulfillment(
     with transaction.atomic():
         locked_order = Order.objects.select_for_update().get(pk=order.pk)
         if locked_order.status in {Order.Status.CANCELLED, Order.Status.REFUNDED}:
-            raise CheckoutStateError(
-                f"Cannot fulfill a {locked_order.status} order.", code="checkout_state_error"
-            )
+            raise CheckoutStateError(f"Cannot fulfill a {locked_order.status} order.", code="checkout_state_error")
         fulfillment = Fulfillment.objects.select_for_update().get(order=locked_order)
         allowed = FULFILLMENT_TRANSITIONS.get(fulfillment.status, set())
         if target_status not in allowed:
@@ -79,41 +77,37 @@ def transition_fulfillment(
         return fulfillment
 
 
-def cancel_order(order: Order, *, actor=None, note: str = "", restock: bool = False) -> Order:
-    # Import locally to avoid a module import cycle (refunds imports payments/promotions).
+def cancel_order(order: Order, *, actor=None, note: str = "", restock: bool | None = None) -> Order:
     from .refunds import create_refund
 
-    order.refresh_from_db()
-    fulfillment = getattr(order, "fulfillment", None)
-    if fulfillment and fulfillment.status in {Fulfillment.Status.SHIPPED, Fulfillment.Status.DELIVERED}:
-        raise CheckoutStateError("Shipped orders cannot be cancelled here; create a refund instead.")
-    if order.status in {Order.Status.CANCELLED, Order.Status.REFUNDED}:
-        return order
+    order_pk = order.pk
+    if restock is None:
+        fulfillment = Fulfillment.objects.filter(order_id=order_pk).first()
+        restock = fulfillment is not None and fulfillment.status == Fulfillment.Status.UNFULFILLED
 
-    # If the order was paid, cancelling must return the money (and optionally restock)
-    # rather than silently keeping the charge and the consumed stock (spec §20.2). The
-    # gateway call happens here, outside the status-transition transaction below.
-    refundable = clamp_money(order.total - order.refund_total)
-    has_payment = order.payments.filter(
-        status__in=[Payment.Status.CONFIRMED, Payment.Status.PARTIALLY_REFUNDED]
-    ).exists()
-    if has_payment and refundable > 0:
-        create_refund(
-            order,
-            amount=refundable,
-            idempotency_key=f"{order.order_number}-cancel",
-            restock=restock,
-            actor=actor,
-            reason=note or "Order cancelled",
-        )
-
+    refund_plan = None
     with transaction.atomic():
-        locked_order = Order.objects.select_for_update().get(pk=order.pk)
-        fulfillment = getattr(locked_order, "fulfillment", None)
-        if fulfillment and fulfillment.status in {Fulfillment.Status.SHIPPED, Fulfillment.Status.DELIVERED}:
+        locked_order = Order.objects.select_for_update().get(pk=order_pk)
+        fulfillment = Fulfillment.objects.select_for_update().get(order=locked_order)
+        if fulfillment.status in {Fulfillment.Status.SHIPPED, Fulfillment.Status.DELIVERED}:
             raise CheckoutStateError("Shipped orders cannot be cancelled here; create a refund instead.")
+        if locked_order.status in {Order.Status.CANCELLED, Order.Status.REFUNDED}:
+            return locked_order
+
+        refundable = clamp_money(locked_order.total - locked_order.refund_total)
+        has_payment = locked_order.payments.filter(
+            status__in=[Payment.Status.CONFIRMED, Payment.Status.PARTIALLY_REFUNDED]
+        ).exists()
+        if has_payment and refundable > 0:
+            refund_plan = {
+                "order": locked_order,
+                "amount": refundable,
+                "idempotency_key": f"{locked_order.order_number}-cancel",
+                "restock": restock,
+                "reason": note or "Order cancelled",
+            }
+
         previous = locked_order.status
-        # A full cancel-refund above sets status to REFUNDED; force CANCELLED semantics.
         locked_order.status = Order.Status.CANCELLED
         locked_order.save(update_fields=["status", "updated_at"])
         OrderStatusEvent.objects.create(
@@ -137,4 +131,18 @@ def cancel_order(order: Order, *, actor=None, note: str = "", restock: bool = Fa
             aggregate_id=str(locked_order.pk),
             payload={"order_number": locked_order.order_number},
         )
-        return locked_order
+        cancelled_order = locked_order
+
+    if refund_plan:
+        create_refund(
+            refund_plan["order"],
+            amount=refund_plan["amount"],
+            idempotency_key=refund_plan["idempotency_key"],
+            restock=refund_plan["restock"],
+            actor=actor,
+            reason=refund_plan["reason"],
+        )
+        # Cancellation is the terminal state; do not leave the order as refunded.
+        Order.objects.filter(pk=cancelled_order.pk).update(status=Order.Status.CANCELLED)
+        cancelled_order.refresh_from_db()
+    return cancelled_order

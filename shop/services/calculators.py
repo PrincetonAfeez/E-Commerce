@@ -1,4 +1,4 @@
-# Flat-rate shipping and tax calculator abstractions with DB-backed overrides
+"""Flat-rate shipping and tax calculator abstractions with DB-backed overrides"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -77,9 +77,7 @@ class DBTaxCalculator(TaxCalculator):
             match = next((r for r in rates if r.region and r.region.lower() == region.lower()), None)
             match = match or next((r for r in rates if not r.region), None)
             if match:
-                return TaxQuote(
-                    rate=match.rate, amount=clamp_money(taxable_amount * match.rate), label=match.label
-                )
+                return TaxQuote(rate=match.rate, amount=clamp_money(taxable_amount * match.rate), label=match.label)
             return TaxQuote(rate=Decimal("0.0000"), amount=Decimal("0.00"), label="No tax")
         return self.fallback.quote(taxable_amount, region=region, country=country)
 
@@ -94,13 +92,12 @@ class DBShippingCalculator(ShippingCalculator):
         from shop.models import ShippingRate
 
         rate = ShippingRate.objects.filter(active=True, method=method).first()
-        rate = rate or ShippingRate.objects.filter(active=True).first()
         if rate is None:
             return self.fallback.quote(subtotal, method=method)
         if rate.free_threshold is not None and subtotal >= rate.free_threshold:
             return ShippingQuote(method=rate.method, amount=Decimal("0.00"))
         if subtotal < rate.min_subtotal:
-            return ShippingQuote(method=rate.method, amount=quantize_money(rate.flat_amount))
+            return self.fallback.quote(subtotal, method=method)
         return ShippingQuote(method=rate.method, amount=quantize_money(rate.flat_amount))
 
 

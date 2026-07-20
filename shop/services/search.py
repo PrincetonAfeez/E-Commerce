@@ -1,4 +1,4 @@
-# Product full-text search on Postgres with icontains fallback and category facets
+"""Product full-text search on Postgres with icontains fallback and category facets"""
 from __future__ import annotations
 
 from django.db import connection
@@ -19,15 +19,9 @@ def search_products(queryset, query: str):
         vector = SearchVector("name", weight="A") + SearchVector("description", weight="B")
         search = SearchQuery(query, search_type="websearch")
         ranked = queryset.annotate(rank=SearchRank(vector, search))
-        return (
-            ranked.filter(Q(rank__gt=0) | Q(variants__sku__icontains=query))
-            .order_by("-rank", "name")
-            .distinct()
-        )
+        return ranked.filter(Q(rank__gt=0) | Q(variants__sku__icontains=query)).order_by("-rank", "name").distinct()
     return queryset.filter(
-        Q(name__icontains=query)
-        | Q(description__icontains=query)
-        | Q(variants__sku__icontains=query)
+        Q(name__icontains=query) | Q(description__icontains=query) | Q(variants__sku__icontains=query)
     ).distinct()
 
 

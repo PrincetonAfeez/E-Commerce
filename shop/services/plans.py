@@ -1,8 +1,9 @@
-# SaaS plan limits, usage tracking, billing cycle invoicing, and product caps
+"""SaaS plan limits, usage tracking, billing cycle invoicing, and product caps"""
 from __future__ import annotations
 
 from datetime import datetime, time
 
+from django.db import transaction
 from django.utils import timezone
 
 from shop.models import Order, Product, Subscription
@@ -44,15 +45,12 @@ def can_create_product(tenant_id=None) -> bool:
 
 def assert_can_create_product(tenant_id=None) -> None:
     if not can_create_product(tenant_id):
-        raise PlanLimitError(
-            "This store has reached its plan's product limit. Upgrade your plan to add more products."
-        )
+        raise PlanLimitError("This store has reached its plan's product limit. Upgrade your plan to add more products.")
 
 
 def _period_bounds(now):
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).date()
-    end = (start.replace(year=start.year + 1, month=1) if start.month == 12
-           else start.replace(month=start.month + 1))
+    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
     return start, end
 
 
@@ -71,23 +69,32 @@ def run_billing_cycle(*, now=None) -> int:
     )
     for sub in subs:
         with tenant_context(sub.tenant_id):
-            _, created = Invoice.objects.get_or_create(
-                period_start=period_start,
-                defaults={
-                    "period_end": period_end,
-                    "plan_name": sub.plan.name,
-                    "amount": sub.plan.price_monthly,
-                    "orders_count": orders_this_month(sub.tenant_id),
-                    # Simulated processor always succeeds (matches the storefront gateway).
-                    "status": Invoice.Status.PAID,
-                },
-            )
-            if created:
-                period_end_dt = timezone.make_aware(
-                    datetime.combine(period_end, time.min)
+            with transaction.atomic():
+                invoice, created = Invoice.objects.get_or_create(
+                    period_start=period_start,
+                    defaults={
+                        "period_end": period_end,
+                        "plan_name": sub.plan.name,
+                        "amount": sub.plan.price_monthly,
+                        "orders_count": orders_this_month(sub.tenant_id),
+                        # Simulated processor always succeeds (matches the storefront gateway).
+                        "status": Invoice.Status.PAID,
+                    },
                 )
-                Subscription._base_manager.filter(pk=sub.pk).update(current_period_end=period_end_dt)
-                issued += 1
+                if created:
+                    period_end_dt = timezone.make_aware(datetime.combine(period_end, time.min))
+                    Subscription._base_manager.filter(pk=sub.pk).update(current_period_end=period_end_dt)
+                    issued += 1
+                else:
+                    update_fields = {
+                        "period_end": period_end,
+                        "plan_name": sub.plan.name,
+                        "amount": sub.plan.price_monthly,
+                        "orders_count": orders_this_month(sub.tenant_id),
+                    }
+                    if invoice.status == Invoice.Status.OPEN:
+                        update_fields["status"] = Invoice.Status.PAID
+                    Invoice.objects.filter(pk=invoice.pk).update(**update_fields)
     return issued
 
 

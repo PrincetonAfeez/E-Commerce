@@ -1,4 +1,4 @@
-# Coupon validation, auto-apply discounts, redemption, and order discount snapshots
+"""Coupon validation, auto-apply discounts, redemption, and order discount snapshots"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -64,16 +64,19 @@ def validate_coupon(
         raise InvalidCoupon("Cart subtotal does not meet the coupon minimum.")
     if promotion.usage_limit is not None and promotion.used_count >= promotion.usage_limit:
         raise InvalidCoupon("Coupon has reached its usage limit.")
-    if user and promotion.per_customer_usage_limit is not None:
-        existing = PromotionRedemption.objects.filter(
-            promotion=promotion, user=user, released=False
-        ).count()
+    if promotion.per_customer_usage_limit is not None:
+        if user:
+            existing = PromotionRedemption.objects.filter(promotion=promotion, user=user, released=False).count()
+        elif guest_email:
+            existing = PromotionRedemption.objects.filter(
+                promotion=promotion, guest_email=guest_email, released=False
+            ).count()
+        else:
+            raise InvalidCoupon("Email is required to validate this coupon for guest checkout.")
         if existing >= promotion.per_customer_usage_limit:
             raise InvalidCoupon("Coupon has already been used by this customer.")
 
-    discount_total, free_shipping = calculate_discount(
-        promotion, subtotal, shipping_total=shipping_total
-    )
+    discount_total, free_shipping = calculate_discount(promotion, subtotal, shipping_total=shipping_total)
     return CouponQuote(coupon=coupon, discount_total=discount_total, free_shipping=free_shipping)
 
 
@@ -86,7 +89,11 @@ class AutoDiscount:
 
 
 def best_auto_discount(
-    subtotal: Decimal, *, shipping_total: Decimal = Decimal("0.00")
+    subtotal: Decimal,
+    *,
+    user=None,
+    guest_email: str = "",
+    shipping_total: Decimal = Decimal("0.00"),
 ) -> AutoDiscount | None:
     """Evaluate active auto-apply promotions and return the single best one (no code)."""
     now = timezone.now()
@@ -98,6 +105,21 @@ def best_auto_discount(
             continue
         if promo.ends_at and promo.ends_at <= now:
             continue
+        if promo.usage_limit is not None and promo.used_count >= promo.usage_limit:
+            continue
+        if promo.per_customer_usage_limit is not None:
+            if user:
+                active_for_customer = PromotionRedemption.objects.filter(
+                    promotion=promo, user=user, released=False
+                ).count()
+            elif guest_email:
+                active_for_customer = PromotionRedemption.objects.filter(
+                    promotion=promo, guest_email=guest_email, released=False
+                ).count()
+            else:
+                continue
+            if active_for_customer >= promo.per_customer_usage_limit:
+                continue
         if subtotal < promo.min_subtotal:
             continue
         discount, free_shipping = calculate_discount(promo, subtotal, shipping_total=shipping_total)
@@ -107,9 +129,7 @@ def best_auto_discount(
         value = discount + (shipping_total if free_shipping else Decimal("0.00"))
         key = (promo.priority, value)
         if best is None or key > best_key:
-            best = AutoDiscount(
-                promotion=promo, discount_total=discount, free_shipping=free_shipping, label=promo.name
-            )
+            best = AutoDiscount(promotion=promo, discount_total=discount, free_shipping=free_shipping, label=promo.name)
             best_key = key
     return best
 
@@ -139,11 +159,18 @@ def redeem_coupon_for_order(order: Order) -> PromotionRedemption | None:
 
     # Per-customer limit is enforced here under the promotion row lock (serialized),
     # honouring per_customer_usage_limit >= 1 rather than a hard unique-per-user rule.
-    if order.user_id and promotion.per_customer_usage_limit is not None:
-        active_for_user = PromotionRedemption.objects.filter(
-            promotion=promotion, user_id=order.user_id, released=False
-        ).count()
-        if active_for_user >= promotion.per_customer_usage_limit:
+    if promotion.per_customer_usage_limit is not None:
+        if order.user_id:
+            active_for_customer = PromotionRedemption.objects.filter(
+                promotion=promotion, user_id=order.user_id, released=False
+            ).count()
+        elif order.guest_email:
+            active_for_customer = PromotionRedemption.objects.filter(
+                promotion=promotion, guest_email=order.guest_email, released=False
+            ).count()
+        else:
+            raise InvalidCoupon("Email is required to redeem this coupon for guest checkout.")
+        if active_for_customer >= promotion.per_customer_usage_limit:
             raise InvalidCoupon("Coupon has already been used by this customer.")
 
     if promotion.usage_limit is None:
@@ -176,6 +203,80 @@ def redeem_coupon_for_order(order: Order) -> PromotionRedemption | None:
             amount=order.discount_total,
         )
     return redemption
+
+
+def redeem_auto_promotion_for_order(order: Order, promotion: Promotion) -> PromotionRedemption:
+    promotion = Promotion.objects.select_for_update().get(pk=promotion.pk)
+    now = timezone.now()
+    if not promotion.active:
+        raise InvalidCoupon("Promotion is not active.")
+    if promotion.starts_at and promotion.starts_at > now:
+        raise InvalidCoupon("Promotion is not active yet.")
+    if promotion.ends_at and promotion.ends_at <= now:
+        raise InvalidCoupon("Promotion has expired.")
+    if order.subtotal < promotion.min_subtotal:
+        raise InvalidCoupon("Cart subtotal does not meet the promotion minimum.")
+    if promotion.usage_limit is not None and promotion.used_count >= promotion.usage_limit:
+        raise InvalidCoupon("Promotion has reached its usage limit.")
+
+    if promotion.per_customer_usage_limit is not None:
+        if order.user_id:
+            active_for_customer = PromotionRedemption.objects.filter(
+                promotion=promotion, user_id=order.user_id, released=False
+            ).count()
+        elif order.guest_email:
+            active_for_customer = PromotionRedemption.objects.filter(
+                promotion=promotion, guest_email=order.guest_email, released=False
+            ).count()
+        else:
+            raise InvalidCoupon("Email is required to redeem this promotion for guest checkout.")
+        if active_for_customer >= promotion.per_customer_usage_limit:
+            raise InvalidCoupon("Promotion has already been used by this customer.")
+
+    if promotion.usage_limit is None:
+        Promotion.objects.filter(pk=promotion.pk).update(used_count=F("used_count") + 1)
+    else:
+        updated = Promotion.objects.filter(pk=promotion.pk, used_count__lt=F("usage_limit")).update(
+            used_count=F("used_count") + 1
+        )
+        if updated != 1:
+            raise InvalidCoupon("Promotion has reached its usage limit.")
+
+    try:
+        redemption = PromotionRedemption.objects.create(
+            promotion=promotion,
+            order=order,
+            user=order.user,
+            guest_email=order.guest_email,
+            discount_amount=order.discount_total,
+        )
+    except IntegrityError as exc:
+        raise InvalidCoupon("Promotion redemption already exists for this order or customer.") from exc
+
+    if order.discount_total:
+        OrderDiscountSnapshot.objects.create(
+            order=order,
+            promotion=promotion,
+            label=promotion.name,
+            amount=order.discount_total,
+        )
+    return redemption
+
+
+def redeem_promotions_for_order(order: Order) -> PromotionRedemption | None:
+    if order.coupon_code_id:
+        return redeem_coupon_for_order(order)
+    if order.discount_total <= 0:
+        return None
+    auto = best_auto_discount(
+        order.subtotal,
+        user=order.user,
+        guest_email=order.guest_email,
+        shipping_total=order.shipping_total,
+    )
+    if auto is None or auto.discount_total != order.discount_total:
+        raise InvalidCoupon("Applied promotion is no longer valid for this order.")
+    return redeem_auto_promotion_for_order(order, auto.promotion)
 
 
 def release_redemptions_for_order(order: Order) -> None:
