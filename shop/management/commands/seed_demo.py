@@ -2,9 +2,10 @@
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from shop.models import (
@@ -26,7 +27,16 @@ from shop.models import (
 class Command(BaseCommand):
     help = "Seed a demo catalog, stock, and coupons."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Allow seeding in production (normally blocked).",
+        )
+
     def handle(self, *args, **options):
+        if settings.IS_PRODUCTION and not options["force"]:
+            raise CommandError("seed_demo is disabled in production; pass --force to override.")
         apparel, _ = Category.objects.get_or_create(name="Apparel", slug="apparel")
         gear, _ = Category.objects.get_or_create(name="Gear", slug="gear")
         home, _ = Category.objects.get_or_create(name="Home", slug="home")
