@@ -1,12 +1,14 @@
 # Runs pg_dump to write a compressed Postgres logical backup to disk
-import os
-import subprocess  # noqa: S404 - invoked with a fixed argv, never a shell string
-from datetime import datetime, timezone
-from pathlib import Path
-from urllib.parse import unquote, urlparse
+"""Backup the database to a file"""
 
-from django.conf import settings
-from django.core.management.base import BaseCommand, CommandError
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from django.core.management.base import BaseCommand
+
+from shop.locks import single_instance
+from shop.services.db_backup import pg_dump, resolve_pg_connection
 
 
 class Command(BaseCommand):
@@ -16,55 +18,91 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
+
         parser.add_argument(
             "--out-dir",
             default=os.environ.get("BACKUP_DIR", "backups"),
             help="Directory to write the dump into (created if missing).",
         )
 
+        parser.add_argument(
+            "--retention-days",
+            type=int,
+            default=30,
+            help="Delete dump files older than this many days after a successful backup.",
+        )
+
     def handle(self, *args, **options):
-        db = settings.DATABASES["default"]
-        engine = db.get("ENGINE", "")
-        if "postgresql" not in engine:
-            raise CommandError(
-                f"backup_db targets Postgres; DATABASES['default'] uses {engine!r}. "
-                "In production the app runs on Postgres — run this against the prod/staging DB."
-            )
 
-        out_dir = Path(options["out_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        target = out_dir / f"{db.get('NAME', 'db')}-{stamp}.dump"
+        with single_instance("backup_db") as acquired:
+            if not acquired:
+                self.stdout.write("Another worker is running backup_db; skipping.")
 
-        # Build a libpq environment from Django's DB config (or DATABASE_URL) so no
-        # credentials land on the command line / process table.
-        env = os.environ.copy()
-        url = os.environ.get("DATABASE_URL")
-        if url:
-            parsed = urlparse(url)
-            host, port, name = parsed.hostname, parsed.port, parsed.path.lstrip("/")
-            user, password = parsed.username, parsed.password
-        else:
-            host, port, name = db.get("HOST"), db.get("PORT"), db.get("NAME")
-            user, password = db.get("USER"), db.get("PASSWORD")
-        if password:
-            env["PGPASSWORD"] = unquote(password)
+                return
 
-        argv = ["pg_dump", "--format=custom", "--no-owner", "--no-privileges", "--file", str(target)]
-        if host:
-            argv += ["--host", str(host)]
-        if port:
-            argv += ["--port", str(port)]
-        if user:
-            argv += ["--username", str(unquote(user))]
-        argv += [str(name)]
+            connection = resolve_pg_connection()
+
+            out_dir = Path(options["out_dir"])
+
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+            target = out_dir / f"{connection.name}-{stamp}.dump"
+
+            pg_dump(target, connection=connection)
+
+            size_mb = target.stat().st_size / (1024 * 1024)
+
+            self.stdout.write(self.style.SUCCESS(f"Backup written: {target} ({size_mb:.1f} MiB)"))
+
+            self._upload_to_s3(target)
+
+            pruned = self._prune_old_dumps(out_dir, options["retention_days"])
+
+            if pruned:
+                self.stdout.write(
+                    self.style.SUCCESS(f"Pruned {pruned} dump(s) older than {options['retention_days']} days.")
+                )
+
+    def _prune_old_dumps(self, out_dir: Path, retention_days: int) -> int:
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+
+        pruned = 0
+
+        for path in out_dir.glob("*.dump"):
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+            if mtime < cutoff:
+                path.unlink()
+
+                pruned += 1
+
+        return pruned
+
+    def _upload_to_s3(self, target: Path) -> None:
+
+        import subprocess  # noqa: S404
+
+        from django.core.management.base import CommandError
+
+        bucket = os.environ.get("BACKUP_S3_BUCKET", "").strip()
+
+        if not bucket:
+            return
+
+        prefix = os.environ.get("BACKUP_S3_PREFIX", "db").strip("/")
+
+        key = f"{prefix}/{target.name}" if prefix else target.name
+
+        argv = ["aws", "s3", "cp", str(target), f"s3://{bucket}/{key}"]
 
         try:
-            subprocess.run(argv, env=env, check=True)  # noqa: S603 - fixed argv, no shell
-        except FileNotFoundError as exc:
-            raise CommandError("pg_dump not found on PATH. Install the Postgres client tools.") from exc
-        except subprocess.CalledProcessError as exc:
-            raise CommandError(f"pg_dump failed with exit code {exc.returncode}.") from exc
+            subprocess.run(argv, check=True)  # noqa: S603
 
-        size_mb = target.stat().st_size / (1024 * 1024)
-        self.stdout.write(self.style.SUCCESS(f"Backup written: {target} ({size_mb:.1f} MiB)"))
+        except FileNotFoundError as exc:
+            raise CommandError("BACKUP_S3_BUCKET is set but the aws CLI was not found on PATH.") from exc
+
+        except subprocess.CalledProcessError as exc:
+            raise CommandError(f"S3 upload failed with exit code {exc.returncode}.") from exc
+
+        self.stdout.write(self.style.SUCCESS(f"Backup uploaded to s3://{bucket}/{key}"))
