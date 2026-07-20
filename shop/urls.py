@@ -1,5 +1,6 @@
-# URL routes for storefront pages: catalog, cart, checkout, orders, reviews, and staff
+"""URL routes for storefront pages: catalog, cart, checkout, orders, reviews, and staff"""
 from django.urls import include, path
+from django.views.decorators.http import require_http_methods
 
 from . import views
 
@@ -78,8 +79,8 @@ staff_patterns = (
         path("orders/", views.staff_order_queue, name="queue"),
         path("orders/<int:pk>/", views.staff_order_detail, name="order_detail"),
         path("orders/<int:pk>/transition/", views.staff_transition_order, name="transition"),
-        path("orders/<int:pk>/refund/", views.staff_refund_order, name="refund"),
-        path("orders/<int:pk>/cancel/", views.staff_cancel_order, name="cancel"),
+        path("orders/<int:pk>/refund/", require_http_methods(["POST"])(views.staff_refund_order), name="refund"),
+        path("orders/<int:pk>/cancel/", require_http_methods(["POST"])(views.staff_cancel_order), name="cancel"),
         path("returns/", views.staff_returns, name="returns"),
         path("returns/<int:pk>/approve/", views.staff_approve_return, name="return_approve"),
         path("returns/<int:pk>/reject/", views.staff_reject_return, name="return_reject"),
