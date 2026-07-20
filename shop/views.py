@@ -1,6 +1,7 @@
-# Server-rendered views for storefront catalog, cart, checkout, accounts, and staff ops
+"""Server-rendered views for storefront catalog, cart, checkout, accounts, and staff ops"""
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -10,7 +11,6 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.tokens import default_token_generator
-from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.mail import send_mail
 from django.core.paginator import Paginator
 from django.db import connection, transaction
@@ -21,7 +21,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
-from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from django.utils.http import url_has_allowed_host_and_scheme, urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.http import require_POST
 
 from .decorators import tenant_staff_required
@@ -48,6 +48,7 @@ from .models import (
     TenantMembership,
     WishlistItem,
 )
+from .ratelimit import ratelimit
 from .services import cart as cart_service
 from .services import credit as credit_service
 from .services.analytics import dashboard_metrics
@@ -62,6 +63,19 @@ from .services.refunds import create_refund
 from .services.returns import approve_return, reject_return, request_return
 from .services.search import category_facets, search_products
 from .tenancy import set_current_tenant
+
+
+def _forbidden_response(request, message: str = "You do not have access to this resource."):
+    if "application/json" in request.headers.get("Accept", ""):
+        return JsonResponse(
+            {"code": "permission_denied", "message": message, "field_errors": {}},
+            status=403,
+        )
+    return HttpResponseForbidden(
+        f"<!DOCTYPE html><html><body><h1>Forbidden</h1><p>{message}</p></body></html>",
+        content_type="text/html; charset=utf-8",
+    )
+
 
 _HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -109,18 +123,25 @@ def robots_txt(request):
     return HttpResponse("\n".join(lines) + "\n", content_type="text/plain")
 
 
+@ratelimit("tls_check", rate=os.environ.get("THROTTLE_TLS_CHECK", "30/min"))
 def tls_check(request):
-    """On-demand-TLS authorization endpoint for the reverse proxy (e.g. Caddy).
+    """On-demand-TLS authorization endpoint for the reverse proxy (e.g. Caddy)."""
+    from django.conf import settings
+    from django.http import HttpResponseForbidden
 
-    The proxy calls this before issuing a certificate for an inbound host; we return
-    200 only for hosts that belong to an active tenant, so certs are never minted for
-    arbitrary domains pointed at us. Returns 404 otherwise."""
     from .models import Tenant
 
+    secret = getattr(settings, "TLS_CHECK_SECRET", "")
+    if secret:
+        provided = request.headers.get("X-TLS-Check-Secret", "") or request.GET.get("secret", "")
+        if provided != secret:
+            return HttpResponseForbidden("forbidden")
+
     domain = (request.GET.get("domain") or "").strip().lower()
-    if domain and Tenant.objects.filter(active=True, primary_domain__iexact=domain).exists():
-        return HttpResponse("ok")
-    return HttpResponse("unknown host", status=404)
+    authorized = bool(domain and Tenant.objects.filter(active=True, primary_domain__iexact=domain).exists())
+    if "application/json" in request.headers.get("Accept", ""):
+        return JsonResponse({"authorized": authorized}, status=200 if authorized else 404)
+    return HttpResponse("ok" if authorized else "unknown host", status=200 if authorized else 404)
 
 
 def unsubscribe(request, token):
@@ -128,24 +149,73 @@ def unsubscribe(request, token):
     from django.core import signing
 
     from .models import EmailSuppression
+    from .tenancy import default_tenant_id
 
     try:
-        email = signing.loads(token, salt="unsubscribe", max_age=60 * 60 * 24 * 90)
+        payload = signing.loads(token, salt="unsubscribe", max_age=60 * 60 * 24 * 90)
     except signing.BadSignature:
         return HttpResponse("This unsubscribe link is invalid or has expired.", status=400)
-    EmailSuppression.objects.get_or_create(email=email.strip().lower())
+    if isinstance(payload, dict):
+        email = payload.get("email", "")
+        tenant_id = payload.get("tenant_id")
+    else:
+        email = payload
+        tenant_id = None
+    tenant_id = tenant_id or default_tenant_id()
+    EmailSuppression.objects.get_or_create(tenant_id=tenant_id, email=email.strip().lower())
     return render(request, "shop/account/unsubscribed.html", {"email": email})
 
 
 def healthz(request):
-    """Liveness + DB connectivity probe (spec §10/§29)."""
+    """Liveness + DB/cache connectivity probe (spec §10/§29)."""
+    from django.core.cache import cache
+
+    checks = {"database": "ok", "cache": "ok"}
+
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             cursor.fetchone()
     except Exception:  # noqa: BLE001 - report unhealthy rather than 500
-        return JsonResponse({"status": "error", "database": "down"}, status=503)
-    return JsonResponse({"status": "ok"})
+        checks["database"] = "down"
+
+    try:
+        probe_key = "healthz:probe"
+        cache.set(probe_key, "1", 10)
+        if cache.get(probe_key) != "1":
+            checks["cache"] = "down"
+        else:
+            cache.delete(probe_key)
+    except Exception:  # noqa: BLE001 - report unhealthy rather than 500
+        checks["cache"] = "down"
+
+    cache_required = settings.IS_PRODUCTION and not getattr(settings, "RUNNING_TESTS", False)
+    unhealthy = checks["database"] == "down" or (cache_required and checks["cache"] == "down")
+    if unhealthy:
+        return JsonResponse({"status": "error", **checks}, status=503)
+    return JsonResponse({"status": "ok", **checks})
+
+
+def readyz(request):
+    """Readiness probe — app process is up and can serve traffic."""
+    return JsonResponse({"status": "ready"})
+
+
+def internal_metrics(request):
+    """Authenticated platform metrics for on-call dashboards."""
+    from django.conf import settings
+    from django.http import HttpResponseForbidden
+
+    from shop.services.ops_metrics import collect_ops_metrics
+
+    secret = getattr(settings, "OPS_METRICS_SECRET", "")
+    if secret:
+        provided = request.headers.get("X-Ops-Metrics-Secret", "") or request.GET.get("secret", "")
+        if provided != secret:
+            return HttpResponseForbidden("forbidden")
+    elif settings.IS_PRODUCTION:
+        return HttpResponseForbidden("forbidden")
+    return JsonResponse(collect_ops_metrics())
 
 
 def register(request):
@@ -159,9 +229,7 @@ def register(request):
             send_verification_email(request, user)
             login(request, user)
             # A subsequent request merges any guest cart into the new user cart.
-            messages.success(
-                request, "Welcome! Check your email to verify your address."
-            )
+            messages.success(request, "Welcome! Check your email to verify your address.")
             return redirect("catalog:list")
     else:
         form = RegistrationForm()
@@ -174,12 +242,8 @@ def send_verification_email(request, user) -> None:
         return
     uid = urlsafe_base64_encode(force_bytes(user.pk))
     token = default_token_generator.make_token(user)
-    link = request.build_absolute_uri(
-        reverse("verify_email", kwargs={"uidb64": uid, "token": token})
-    )
-    body = render_to_string(
-        "shop/account/verification_email.html", {"user": user, "verification_link": link}
-    )
+    link = request.build_absolute_uri(reverse("verify_email", kwargs={"uidb64": uid, "token": token}))
+    body = render_to_string("shop/account/verification_email.html", {"user": user, "verification_link": link})
     send_mail(
         subject="Verify your Aster Commerce email",
         message=body,
@@ -192,6 +256,7 @@ def send_verification_email(request, user) -> None:
         template="account.verification_email",
         status=EmailDelivery.Status.SENT,
         sent_at=timezone.now(),
+        tenant=getattr(request, "tenant", None),
     )
 
 
@@ -235,29 +300,61 @@ def _hash_email(value: str) -> str:
 # --- Saved addresses ---
 @login_required
 def address_list(request):
-    return render(
-        request, "shop/account/addresses.html", {"addresses": request.user.addresses.all()}
-    )
+    return render(request, "shop/account/addresses.html", {"addresses": request.user.addresses.all()})
 
 
 @login_required
 @require_POST
 def address_create(request):
+    label = (request.POST.get("label") or "")[:60]
+    name = (request.POST.get("name") or "").strip()
+    address1 = (request.POST.get("address1") or "").strip()
+    address2 = (request.POST.get("address2") or "")[:180]
+    city = (request.POST.get("city") or "").strip()
+    region = (request.POST.get("region") or "")[:120]
+    postal_code = (request.POST.get("postal_code") or "").strip()
+    country = (request.POST.get("country") or "US").strip().upper()[:2]
+    phone = (request.POST.get("phone") or "")[:40]
     make_default = request.POST.get("is_default") == "on"
+
+    errors = []
+    if not name:
+        errors.append("Name is required.")
+    elif len(name) > 180:
+        errors.append("Name is too long.")
+    if not address1:
+        errors.append("Address is required.")
+    elif len(address1) > 180:
+        errors.append("Address is too long.")
+    if not city:
+        errors.append("City is required.")
+    elif len(city) > 120:
+        errors.append("City is too long.")
+    if not postal_code:
+        errors.append("ZIP / postal code is required.")
+    elif len(postal_code) > 32:
+        errors.append("ZIP / postal code is too long.")
+    if len(country) != 2:
+        errors.append("Country must be a 2-letter code.")
+    if errors:
+        for message in errors:
+            messages.error(request, message)
+        return redirect("account:addresses")
+
     with transaction.atomic():
         if make_default:
             request.user.addresses.update(is_default=False)
         Address.objects.create(
             user=request.user,
-            label=request.POST.get("label", ""),
-            name=request.POST.get("name", ""),
-            address1=request.POST.get("address1", ""),
-            address2=request.POST.get("address2", ""),
-            city=request.POST.get("city", ""),
-            region=request.POST.get("region", ""),
-            postal_code=request.POST.get("postal_code", ""),
-            country=request.POST.get("country", "US"),
-            phone=request.POST.get("phone", ""),
+            label=label,
+            name=name,
+            address1=address1,
+            address2=address2,
+            city=city,
+            region=region,
+            postal_code=postal_code,
+            country=country,
+            phone=phone,
             is_default=make_default or not request.user.addresses.exists(),
         )
     messages.success(request, "Address saved.")
@@ -298,6 +395,9 @@ def account_data_export(request):
 @login_required
 def account_delete(request):
     if request.method == "POST":
+        if not request.user.check_password(request.POST.get("password", "")):
+            messages.error(request, "Incorrect password. Account was not deleted.")
+            return render(request, "shop/account/delete_account.html", {})
         from django.contrib.auth import logout
 
         from .services.accounts import delete_account
@@ -369,7 +469,10 @@ def wishlist_toggle(request):
     else:
         WishlistItem.objects.get_or_create(user=request.user, variant=variant)
         messages.success(request, "Added to wishlist.")
-    return redirect(request.META.get("HTTP_REFERER") or "catalog:list")
+    referer = request.META.get("HTTP_REFERER")
+    if referer and url_has_allowed_host_and_scheme(referer, allowed_hosts={request.get_host()}):
+        return redirect(referer)
+    return redirect("catalog:list")
 
 
 # --- Reorder ---
@@ -399,6 +502,7 @@ def reorder(request, order_number):
 # --- Reviews ---
 @login_required
 @require_POST
+@ratelimit("submit_review", rate=os.environ.get("THROTTLE_SUBMIT_REVIEW", "5/h"))
 def submit_review(request, slug):
     product = get_object_or_404(Product, slug=slug, status=Product.Status.ACTIVE)
     try:
@@ -408,9 +512,7 @@ def submit_review(request, slug):
     if not 1 <= rating <= 5:
         messages.error(request, "Please choose a rating from 1 to 5.")
         return redirect("catalog:detail", slug=slug)
-    verified = OrderItem.objects.filter(
-        order__user=request.user, variant__product=product
-    ).exists()
+    verified = OrderItem.objects.filter(order__user=request.user, variant__product=product).exists()
     Review.objects.update_or_create(
         product=product,
         user=request.user,
@@ -429,9 +531,7 @@ def submit_review(request, slug):
 # --- Returns / RMA ---
 @login_required
 def order_return(request, order_number):
-    order = get_object_or_404(
-        Order.objects.prefetch_related("items"), order_number=order_number, user=request.user
-    )
+    order = get_object_or_404(Order.objects.prefetch_related("items"), order_number=order_number, user=request.user)
     if request.method == "POST":
         lines = []
         for item in order.items.all():
@@ -452,14 +552,13 @@ def order_return(request, order_number):
 
 @tenant_staff_required
 def staff_returns(request):
-    returns = (
-        ReturnRequest.objects.select_related("order").prefetch_related("lines").order_by("-created_at")
-    )
+    returns = ReturnRequest.objects.select_related("order").prefetch_related("lines").order_by("-created_at")
     return render(request, "shop/staff_ops/returns.html", {"returns": returns})
 
 
 @tenant_staff_required(roles=["owner", "manager"])
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_approve_return(request, pk):
     rr = get_object_or_404(ReturnRequest, pk=pk)
     try:
@@ -477,6 +576,7 @@ def staff_approve_return(request, pk):
 
 @tenant_staff_required(roles=["owner", "manager"])
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_reject_return(request, pk):
     rr = get_object_or_404(ReturnRequest, pk=pk)
     try:
@@ -487,6 +587,7 @@ def staff_reject_return(request, pk):
     return redirect("staff_ops:returns")
 
 
+@ratelimit("guest_order_lookup", rate=os.environ.get("THROTTLE_GUEST_ORDER_LOOKUP", "10/h"), field="email")
 def guest_order_lookup(request):
     """Email the tokenized order link to a guest who provides their email + order number.
 
@@ -495,9 +596,7 @@ def guest_order_lookup(request):
         email = request.POST.get("email", "").strip().lower()
         order_number = request.POST.get("order_number", "").strip()
         order = (
-            Order.objects.filter(order_number=order_number, guest_email__iexact=email)
-            .filter(user__isnull=True)
-            .first()
+            Order.objects.filter(order_number=order_number, guest_email__iexact=email).filter(user__isnull=True).first()
         )
         if order and email:
             link = request.build_absolute_uri(
@@ -510,9 +609,7 @@ def guest_order_lookup(request):
                 recipient_list=[order.guest_email],
                 fail_silently=True,
             )
-        messages.success(
-            request, "If that order exists, we've emailed a secure link to view it."
-        )
+        messages.success(request, "If that order exists, we've emailed a secure link to view it.")
         return redirect("orders:lookup")
     return render(request, "shop/orders/order_lookup.html", {})
 
@@ -546,8 +643,9 @@ def catalog_list(request):
     featured = []
     if not any([query, category, collection, min_price, max_price]):
         featured = list(
-            Product.objects.filter(status=Product.Status.ACTIVE, featured=True)
-            .prefetch_related(Prefetch("variants", queryset=variants_with_availability()), "images")[:4]
+            Product.objects.filter(status=Product.Status.ACTIVE, featured=True).prefetch_related(
+                Prefetch("variants", queryset=variants_with_availability()), "images"
+            )[:4]
         )
     return render(
         request,
@@ -579,8 +677,9 @@ def product_detail(request, slug):
     cart = cart_service.get_or_create_cart_for_request(request)
     track_recently_viewed(request, product)
     related = list(
-        product.related_products.filter(status=Product.Status.ACTIVE)
-        .prefetch_related(Prefetch("variants", queryset=variants_with_availability()), "images")[:4]
+        product.related_products.filter(status=Product.Status.ACTIVE).prefetch_related(
+            Prefetch("variants", queryset=variants_with_availability()), "images"
+        )[:4]
     )
     if not related:
         related = also_bought(product, limit=4)
@@ -592,13 +691,9 @@ def product_detail(request, slug):
     if request.user.is_authenticated:
         variant_ids = [v.id for v in product.variants.all()]
         wishlisted = set(
-            request.user.wishlist_items.filter(variant_id__in=variant_ids).values_list(
-                "variant_id", flat=True
-            )
+            request.user.wishlist_items.filter(variant_id__in=variant_ids).values_list("variant_id", flat=True)
         )
-        can_review = OrderItem.objects.filter(
-            order__user=request.user, variant__product=product
-        ).exists()
+        can_review = OrderItem.objects.filter(order__user=request.user, variant__product=product).exists()
     return render(
         request,
         "shop/catalog/product_detail.html",
@@ -623,10 +718,15 @@ def cart_detail(request):
 
 
 @require_POST
+@ratelimit("cart", rate=os.environ.get("THROTTLE_CART", "120/min"), methods=("POST",))
 def add_to_cart(request):
     cart = cart_service.get_or_create_cart_for_request(request)
     variant = get_object_or_404(ProductVariant.objects.select_related("product"), pk=request.POST.get("variant_id"))
-    quantity = int(request.POST.get("quantity") or 1)
+    try:
+        quantity = int(request.POST.get("quantity") or 1)
+    except (TypeError, ValueError):
+        messages.error(request, "Enter a valid quantity.")
+        return _cart_response(request, cart)
     try:
         cart_service.add_item(cart, variant, quantity)
         messages.success(request, "Added to cart.")
@@ -636,10 +736,15 @@ def add_to_cart(request):
 
 
 @require_POST
+@ratelimit("cart", rate=os.environ.get("THROTTLE_CART", "120/min"), methods=("POST",))
 def update_cart_item(request):
     cart = cart_service.get_or_create_cart_for_request(request)
     variant = get_object_or_404(ProductVariant, pk=request.POST.get("variant_id"))
-    quantity = int(request.POST.get("quantity") or 0)
+    try:
+        quantity = int(request.POST.get("quantity") or 0)
+    except (TypeError, ValueError):
+        messages.error(request, "Enter a valid quantity.")
+        return _cart_response(request, cart)
     try:
         cart_service.set_item_quantity(cart, variant, quantity)
     except CommerceError as exc:
@@ -648,6 +753,7 @@ def update_cart_item(request):
 
 
 @require_POST
+@ratelimit("cart", rate=os.environ.get("THROTTLE_CART", "120/min"), methods=("POST",))
 def apply_coupon(request):
     cart = cart_service.get_or_create_cart_for_request(request)
     try:
@@ -659,16 +765,38 @@ def apply_coupon(request):
 
 
 @require_POST
+@ratelimit("cart", rate=os.environ.get("THROTTLE_CART", "120/min"), methods=("POST",))
 def remove_coupon(request):
     cart = cart_service.get_or_create_cart_for_request(request)
     cart_service.remove_coupon(cart)
     return _cart_response(request, cart)
 
 
+@ratelimit("checkout", rate=os.environ.get("THROTTLE_CHECKOUT", "20/min"), methods=("POST",))
 def checkout_start(request):
     cart = cart_service.get_or_create_cart_for_request(request)
     totals = cart_service.recalculate_cart(cart)
     if request.method == "POST":
+        if not request.user.is_authenticated and not request.POST.get("email", "").strip():
+            messages.error(request, "Email is required for guest checkout.")
+            default_address = None
+            store_credit = Decimal("0.00")
+            return render(
+                request,
+                "shop/checkout/checkout_start.html",
+                {
+                    "cart": cart,
+                    "totals": totals,
+                    "idempotency_key": uuid.uuid4().hex,
+                    "default_address": default_address,
+                    "store_credit": store_credit,
+                },
+            )
+        if request.user.is_authenticated:
+            profile, _ = AccountProfile.objects.get_or_create(user=request.user)
+            if not profile.email_verified:
+                messages.error(request, "Verify your email before checkout.")
+                return redirect("resend_verification")
         try:
             attempt = begin_checkout(
                 cart,
@@ -711,6 +839,7 @@ def checkout_start(request):
     )
 
 
+@ratelimit("payment", rate=os.environ.get("THROTTLE_PAYMENT", "20/min"), methods=("POST",))
 def checkout_payment(request, pk):
     attempt = _attempt_for_request(request, pk)
     if request.method == "POST":
@@ -751,7 +880,7 @@ def checkout_complete(request, order_number):
         order_number=order_number,
     )
     if not _can_view_order(request, order):
-        return HttpResponseForbidden("Forbidden")
+        return _forbidden_response(request)
     return render(request, "shop/checkout/complete.html", {"order": order})
 
 
@@ -769,18 +898,17 @@ def _can_view_order(request, order) -> bool:
 @login_required
 def order_history(request):
     orders = Order.objects.filter(user=request.user).select_related("fulfillment").prefetch_related("items")
-    return render(request, "shop/orders/order_history.html", {"orders": orders})
+    page = Paginator(orders, 25).get_page(request.GET.get("page"))
+    return render(request, "shop/orders/order_history.html", {"page": page})
 
 
 def order_detail(request, order_number):
     order = get_object_or_404(
-        Order.objects.select_related("fulfillment", "checkout_attempt").prefetch_related(
-            "items", "status_events"
-        ),
+        Order.objects.select_related("fulfillment", "checkout_attempt").prefetch_related("items", "status_events"),
         order_number=order_number,
     )
     if not _can_view_order(request, order):
-        return HttpResponseForbidden("Forbidden")
+        return _forbidden_response(request)
     return render(request, "shop/orders/order_detail.html", {"order": order})
 
 
@@ -822,7 +950,8 @@ def staff_low_stock(request):
     return render(request, "shop/staff_ops/low_stock.html", {"low_stock": metrics["low_stock"]})
 
 
-@tenant_staff_required
+@tenant_staff_required(roles=[TenantMembership.Role.OWNER, TenantMembership.Role.MANAGER])
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_settings(request):
     store = StoreSettings.get_solo()
     if request.method == "POST":
@@ -849,13 +978,18 @@ def _onboarding_checklist() -> list[dict]:
     return [
         {"label": "Name your store", "done": store.store_name != "Aster Commerce", "url": "staff_ops:settings"},
         {"label": "Add a product", "done": Product.objects.exists(), "url": "admin:shop_product_changelist"},
-        {"label": "Configure shipping", "done": ShippingRate.objects.exists(), "url": "admin:shop_shippingrate_changelist"},
+        {
+            "label": "Configure shipping",
+            "done": ShippingRate.objects.exists(),
+            "url": "admin:shop_shippingrate_changelist",
+        },
         {"label": "Set support email", "done": bool(store.support_email), "url": "staff_ops:settings"},
         {"label": "Choose a plan", "done": Subscription.get_solo().plan_id is not None, "url": "staff_ops:billing"},
     ]
 
 
-@tenant_staff_required
+@tenant_staff_required(roles=[TenantMembership.Role.OWNER, TenantMembership.Role.MANAGER])
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_billing(request):
     subscription = Subscription.get_solo()
     if request.method == "POST":
@@ -883,6 +1017,11 @@ def staff_billing(request):
 def store_signup(request):
     from django.utils.text import slugify
 
+    from shop.feature_flags import is_enabled
+
+    if not is_enabled("SELF_SERVE_SIGNUP"):
+        return _forbidden_response(request, "Self-serve store signup is temporarily unavailable.")
+
     if request.method == "POST":
         User = get_user_model()
         store_name = request.POST.get("store_name", "").strip()
@@ -894,7 +1033,9 @@ def store_signup(request):
             errors.append("All fields are required.")
         if subdomain and Tenant.objects.filter(slug=subdomain).exists():
             errors.append("That store address is already taken.")
-        if email and (User.objects.filter(username=email).exists() or User.objects.filter(email__iexact=email).exists()):
+        if email and (
+            User.objects.filter(username=email).exists() or User.objects.filter(email__iexact=email).exists()
+        ):
             errors.append("An account with that email already exists.")
         if errors:
             for e in errors:
@@ -908,9 +1049,7 @@ def store_signup(request):
                 set_current_tenant(tenant)
                 owner = User.objects.create_user(username=email, email=email, password=password)
                 AccountProfile.objects.create(user=owner)
-                TenantMembership.objects.create(
-                    tenant=tenant, user=owner, role=TenantMembership.Role.OWNER
-                )
+                TenantMembership.objects.create(tenant=tenant, user=owner, role=TenantMembership.Role.OWNER)
                 store = StoreSettings.get_solo()
                 store.store_name = store_name
                 store.save()
@@ -934,32 +1073,43 @@ def staff_team(request):
 
 @tenant_staff_required(roles=[TenantMembership.Role.OWNER, TenantMembership.Role.MANAGER])
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_invite_member(request):
     User = get_user_model()
     email = request.POST.get("email", "").strip().lower()
     role = request.POST.get("role", TenantMembership.Role.STAFF)
     if role not in TenantMembership.Role.values:
         role = TenantMembership.Role.STAFF
+    caller_role = getattr(request, "tenant_role", TenantMembership.Role.STAFF)
+    if role == TenantMembership.Role.OWNER and caller_role != TenantMembership.Role.OWNER:
+        messages.error(request, "Only owners can grant the owner role.")
+        return redirect("staff_ops:team")
+    if role == TenantMembership.Role.MANAGER and caller_role not in (
+        TenantMembership.Role.OWNER,
+        TenantMembership.Role.MANAGER,
+    ):
+        messages.error(request, "You cannot assign that role.")
+        return redirect("staff_ops:team")
+    if caller_role == TenantMembership.Role.MANAGER and role != TenantMembership.Role.STAFF:
+        messages.error(request, "Managers can only invite staff members.")
+        return redirect("staff_ops:team")
     if not email:
         messages.error(request, "Enter an email address.")
         return redirect("staff_ops:team")
-    user, created = User.objects.get_or_create(
-        username=email, defaults={"email": email}
-    )
+    user, created = User.objects.get_or_create(username=email, defaults={"email": email})
     if created:
         user.set_unusable_password()
         user.save()
         AccountProfile.objects.get_or_create(user=user)
         send_verification_email(request, user)  # doubles as a set-up invite link path
-    TenantMembership.objects.get_or_create(
-        tenant=request.tenant, user=user, defaults={"role": role}
-    )
+    TenantMembership.objects.get_or_create(tenant=request.tenant, user=user, defaults={"role": role})
     messages.success(request, f"{email} was added to your team.")
     return redirect("staff_ops:team")
 
 
 @tenant_staff_required(roles=[TenantMembership.Role.OWNER])
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_remove_member(request, pk):
     membership = get_object_or_404(TenantMembership, pk=pk)
     if membership.role == TenantMembership.Role.OWNER:
@@ -973,15 +1123,14 @@ def staff_remove_member(request, pk):
 @tenant_staff_required
 def staff_order_queue(request):
     orders = Order.objects.select_related("fulfillment").prefetch_related("items").order_by("-created_at")
-    return render(request, "shop/staff_ops/order_queue.html", {"orders": orders})
+    page = Paginator(orders, 25).get_page(request.GET.get("page"))
+    return render(request, "shop/staff_ops/order_queue.html", {"page": page})
 
 
 @tenant_staff_required
 def staff_order_detail(request, pk):
     order = get_object_or_404(
-        Order.objects.select_related("fulfillment").prefetch_related(
-            "items", "status_events", "payments", "refunds"
-        ),
+        Order.objects.select_related("fulfillment").prefetch_related("items", "status_events", "payments", "refunds"),
         pk=pk,
     )
     return render(
@@ -993,12 +1142,14 @@ def staff_order_detail(request, pk):
             # Fresh per-render key: double-submitting THIS form is idempotent, but each
             # new refund the staffer opens gets its own key so partial refunds accrue.
             "refund_idempotency_key": f"{order.order_number}-refund-{uuid.uuid4().hex[:12]}",
+            "cancel_idempotency_key": f"{order.order_number}-cancel-{uuid.uuid4().hex[:12]}",
         },
     )
 
 
 @tenant_staff_required
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_transition_order(request, pk):
     order = get_object_or_404(Order, pk=pk)
     try:
@@ -1018,13 +1169,24 @@ def staff_transition_order(request, pk):
 
 @tenant_staff_required(roles=["owner", "manager"])
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_refund_order(request, pk):
     order = get_object_or_404(Order, pk=pk)
     try:
+        amount_raw = request.POST.get("amount") or "0"
+        amount = Decimal(amount_raw)
+    except InvalidOperation:
+        messages.error(request, "Enter a valid refund amount.")
+        return redirect("staff_ops:order_detail", pk=pk)
+    idempotency_key = request.POST.get("idempotency_key", "").strip()
+    if not idempotency_key:
+        messages.error(request, "Idempotency key is required for refunds.")
+        return redirect("staff_ops:order_detail", pk=pk)
+    try:
         create_refund(
             order,
-            amount=Decimal(request.POST.get("amount") or "0"),
-            idempotency_key=request.POST.get("idempotency_key") or uuid.uuid4().hex,
+            amount=amount,
+            idempotency_key=idempotency_key,
             restock=request.POST.get("restock") == "on",
             actor=request.user,
             reason=request.POST.get("reason", ""),
@@ -1037,8 +1199,52 @@ def staff_refund_order(request, pk):
 
 @tenant_staff_required(roles=["owner", "manager"])
 @require_POST
+@ratelimit("staff", rate=os.environ.get("THROTTLE_STAFF", "60/min"), methods=("POST",))
 def staff_cancel_order(request, pk):
+    import json
+
+    from .models import IdempotencyRecord
+    from .services import idempotency
+    from .services.exceptions import IdempotencyInProgress, IdempotencyKeyReuseMismatch
+
     order = get_object_or_404(Order, pk=pk)
+    idempotency_key = request.POST.get("idempotency_key", "").strip()
+    if not idempotency_key:
+        messages.error(request, "Idempotency key is required to cancel.")
+        return redirect("staff_ops:order_detail", pk=pk)
+
+    payload = json.dumps(
+        {
+            "note": request.POST.get("note", ""),
+            "restock": request.POST.get("restock") == "on",
+        },
+        sort_keys=True,
+    )
+    scope_key = f"{pk}:{idempotency_key}"
+
+    try:
+        record = idempotency.begin(
+            "staff.cancel",
+            scope_key,
+            user=request.user,
+            session_key=request.session.session_key or "",
+            payload=payload,
+        )
+    except (IdempotencyInProgress, IdempotencyKeyReuseMismatch) as exc:
+        messages.error(request, exc.message)
+        return redirect("staff_ops:order_detail", pk=pk)
+
+    if record.status in {
+        IdempotencyRecord.Status.COMPLETED,
+        IdempotencyRecord.Status.FAILED,
+    }:
+        body = record.response_body or {}
+        if record.response_status == 200:
+            messages.success(request, body.get("message", "Order cancelled."))
+        else:
+            messages.error(request, body.get("message", "Cancel failed."))
+        return redirect("staff_ops:order_detail", pk=pk)
+
     try:
         cancel_order(
             order,
@@ -1046,9 +1252,14 @@ def staff_cancel_order(request, pk):
             note=request.POST.get("note", ""),
             restock=request.POST.get("restock") == "on",
         )
+        idempotency.complete(record, status=200, body={"message": "Order cancelled."})
         messages.success(request, "Order cancelled.")
     except CommerceError as exc:
+        idempotency.fail(record, status=400, body=exc.as_dict())
         messages.error(request, exc.message)
+    except Exception:
+        idempotency.abandon(record)
+        raise
     return redirect("staff_ops:order_detail", pk=pk)
 
 
@@ -1070,10 +1281,8 @@ def _cart_response(request, cart):
 
 
 def _attempt_for_request(request, pk):
-    attempt = get_object_or_404(CheckoutAttempt.objects.select_related("cart", "user"), pk=pk)
-    if attempt.user_id:
-        if not request.user.is_authenticated or attempt.user_id != request.user.pk:
-            raise DjangoPermissionDenied
-    elif attempt.session_key != (request.session.session_key or ""):
-        raise DjangoPermissionDenied
-    return attempt
+    queryset = CheckoutAttempt.objects.select_related("cart", "user")
+    if request.user.is_authenticated:
+        return get_object_or_404(queryset, pk=pk, user=request.user)
+    session_key = request.session.session_key or ""
+    return get_object_or_404(queryset, pk=pk, session_key=session_key)
