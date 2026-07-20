@@ -7,7 +7,7 @@
     <table>
       <thead><tr><th>Order</th><th>Status</th><th>Total</th><th>Date</th><th></th></tr></thead>
       <tbody>
-        {% for order in orders %}
+        {% for order in page.object_list %}
           <tr>
             <td><a href="{% url 'orders:detail' order.order_number %}">{{ order.order_number }}</a></td>
             <td>{{ order.paid_status|title }}</td>
@@ -25,5 +25,12 @@
       </tbody>
     </table>
   </div>
+  {% if page.has_other_pages %}
+    <nav class="pagination">
+      {% if page.has_previous %}<a href="?page={{ page.previous_page_number }}">Previous</a>{% endif %}
+      <span>Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+      {% if page.has_next %}<a href="?page={{ page.next_page_number }}">Next</a>{% endif %}
+    </nav>
+  {% endif %}
 </section>
 {% endblock %}

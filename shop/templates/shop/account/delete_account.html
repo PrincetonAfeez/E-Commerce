@@ -9,6 +9,9 @@
      anonymized form for the store's legal/accounting records.</p>
   <form class="form-panel" method="post" action="{% url 'account:delete' %}">
     {% csrf_token %}
+    <label>Current password
+      <input type="password" name="password" required autocomplete="current-password">
+    </label>
     <label class="check"><input type="checkbox" name="confirm" required> I understand this cannot be undone</label>
     <button class="button danger" type="submit">Delete my account</button>
   </form>

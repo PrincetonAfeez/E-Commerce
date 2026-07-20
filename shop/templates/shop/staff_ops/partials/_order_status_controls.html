@@ -16,6 +16,7 @@
   </form>
   <form class="stack" method="post" action="{% url 'staff_ops:cancel' order.pk %}">
     {% csrf_token %}
+    <input type="hidden" name="idempotency_key" value="{{ cancel_idempotency_key }}">
     <label>Cancel note <input type="text" name="note"></label>
     <label class="check"><input type="checkbox" name="restock"> Restock items on cancel</label>
     <button class="button danger" type="submit">Cancel order</button>
