@@ -1,0 +1,43 @@
+# Production-oriented compose overlay. Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod up -d
+services:
+  web:
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "0"
+      DJANGO_SECURE_SSL_REDIRECT: "1"
+      DJANGO_EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      GATEWAY_TEST_MODES_ENABLED: "0"
+      REQUIRE_TENANT_CONTEXT: "1"
+      RUN_MIGRATIONS: "1"
+      PAYMENT_GATEWAY: simulated
+    env_file:
+      - path: .env.production
+        required: false
+    profiles:
+      - prod
+
+  worker:
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "0"
+      GATEWAY_TEST_MODES_ENABLED: "0"
+      REQUIRE_TENANT_CONTEXT: "1"
+      RETENTION_DAYS: "365"
+    env_file:
+      - path: .env.production
+        required: false
+    profiles:
+      - prod
+
+  backup:
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "0"
+      REQUIRE_TENANT_CONTEXT: "1"
+      BACKUP_DIR: /backups
+    env_file:
+      - path: .env.production
+        required: false
+    profiles:
+      - prod
