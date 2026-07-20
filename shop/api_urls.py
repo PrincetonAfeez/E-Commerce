@@ -1,4 +1,4 @@
-# DRF router and REST URL patterns for catalog, cart, checkout, and staff endpoints
+"""DRF router and REST URL patterns for catalog, cart, checkout, and staff endpoints"""
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
@@ -17,12 +17,19 @@ urlpatterns = [
     path("cart/remove-coupon/", api.RemoveCouponView.as_view(), name="api-cart-remove-coupon"),
     path("checkout/attempts/", api.CheckoutAttemptsView.as_view(), name="api-checkout-attempts"),
     path(
+        "checkout/attempts/<int:pk>/authorize-payment/",
+        api.AuthorizePaymentView.as_view(),
+        name="api-checkout-authorize-payment",
+    ),
+    path(
         "checkout/attempts/<int:pk>/confirm-payment/",
         api.ConfirmPaymentView.as_view(),
         name="api-checkout-confirm-payment",
     ),
+    path("webhooks/payments/<str:provider>/", api.PaymentWebhookView.as_view(), name="api-payment-webhook"),
     path("orders/", api.OrderListView.as_view(), name="api-orders"),
     path("orders/<str:order_number>/", api.OrderDetailView.as_view(), name="api-order-detail"),
+    path("guest/orders/lookup/", api.GuestOrderLookupView.as_view(), name="api-guest-order-lookup"),
     path("guest/orders/<uuid:order_token>/", api.GuestOrderView.as_view(), name="api-guest-order"),
     path("staff/orders/", api.StaffOrderListView.as_view(), name="api-staff-orders"),
     path("staff/orders/<int:pk>/transition/", api.StaffTransitionView.as_view(), name="api-staff-order-transition"),
