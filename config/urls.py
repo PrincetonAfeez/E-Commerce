@@ -12,13 +12,15 @@ from shop.ratelimit import ratelimit
 
 # The Django admin is the platform-operator console (unscoped across tenants), so restrict
 # it to superusers — store staff use the tenant-scoped /staff/ area, never /admin/.
-admin.site.has_permission = lambda request: bool(
-    request.user.is_active and request.user.is_superuser
-)
+admin.site.has_permission = lambda request: bool(request.user.is_active and request.user.is_superuser)
 
 # Rate limits for the auth surface (DRF throttles do not cover Django auth views) — §9/§27.1.
 _LOGIN_RATE = os.environ.get("THROTTLE_LOGIN", "10/min")
 _RESET_RATE = os.environ.get("THROTTLE_PASSWORD_RESET", "5/min")
+_SIGNUP_RATE = os.environ.get("THROTTLE_STORE_SIGNUP", "5/h")
+_CHECKOUT_RATE = os.environ.get("THROTTLE_CHECKOUT", "20/min")
+_GUEST_LOOKUP_RATE = os.environ.get("THROTTLE_GUEST_ORDER_LOOKUP", "10/h")
+_VERIFY_RATE = os.environ.get("THROTTLE_RESEND_VERIFICATION", "3/h")
 
 account_patterns = [
     path(
@@ -31,7 +33,11 @@ account_patterns = [
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),
     path("register/", ratelimit("register", rate=_LOGIN_RATE)(shop_views.register), name="register"),
     path("verify/<uidb64>/<token>/", shop_views.verify_email, name="verify_email"),
-    path("verify/resend/", shop_views.resend_verification, name="resend_verification"),
+    path(
+        "verify/resend/",
+        ratelimit("resend_verification", rate=_VERIFY_RATE, methods=("POST", "GET"))(shop_views.resend_verification),
+        name="resend_verification",
+    ),
     path(
         "password-reset/",
         ratelimit("password_reset", rate=_RESET_RATE)(
@@ -45,23 +51,17 @@ account_patterns = [
     ),
     path(
         "password-reset/done/",
-        auth_views.PasswordResetDoneView.as_view(
-            template_name="shop/account/password_reset_done.html"
-        ),
+        auth_views.PasswordResetDoneView.as_view(template_name="shop/account/password_reset_done.html"),
         name="password_reset_done",
     ),
     path(
         "reset/<uidb64>/<token>/",
-        auth_views.PasswordResetConfirmView.as_view(
-            template_name="shop/account/password_reset_confirm.html"
-        ),
+        auth_views.PasswordResetConfirmView.as_view(template_name="shop/account/password_reset_confirm.html"),
         name="password_reset_confirm",
     ),
     path(
         "reset/done/",
-        auth_views.PasswordResetCompleteView.as_view(
-            template_name="shop/account/password_reset_complete.html"
-        ),
+        auth_views.PasswordResetCompleteView.as_view(template_name="shop/account/password_reset_complete.html"),
         name="password_reset_complete",
     ),
 ]
@@ -69,7 +69,9 @@ account_patterns = [
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("healthz/", shop_views.healthz, name="healthz"),
-    path("signup/", shop_views.store_signup, name="store_signup"),
+    path("readyz/", shop_views.readyz, name="readyz"),
+    path("internal/metrics/", shop_views.internal_metrics, name="internal_metrics"),
+    path("signup/", ratelimit("store_signup", rate=_SIGNUP_RATE)(shop_views.store_signup), name="store_signup"),
     path("unsubscribe/<str:token>/", shop_views.unsubscribe, name="unsubscribe"),
     path("legal/terms/", shop_views.legal_terms, name="terms"),
     path("legal/privacy/", shop_views.legal_privacy, name="privacy"),
@@ -82,7 +84,7 @@ urlpatterns = [
     path("api/v1/", include("shop.api_urls")),
 ]
 
-if getattr(settings, "HAS_SPECTACULAR", False):
+if getattr(settings, "HAS_SPECTACULAR", False) and not settings.IS_PRODUCTION:
     from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
     urlpatterns += [
