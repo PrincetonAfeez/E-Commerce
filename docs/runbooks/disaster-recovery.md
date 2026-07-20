@@ -1,5 +1,5 @@
 # Runbook: Disaster Recovery (DR)
-
+ 
 How the platform recovers from the loss of the database, the application tier, or a whole
 region. Pairs with [backup-restore.md](backup-restore.md) (mechanics) and
 [incident-response.md](incident-response.md) (comms/coordination).

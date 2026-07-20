@@ -54,6 +54,20 @@ provider level. `backup_db` is the portable, provider-independent second line.
 
 ## Verifying backups (do not skip)
 
-A backup is only real once a restore has succeeded. Monthly: restore the latest dump into a
-throwaway database, run `migrate --check` and the smoke test above, record the result. See
-the restore-drill note in [disaster-recovery.md](disaster-recovery.md).
+A backup is only real once a restore has succeeded.
+
+**Automated (CI + staging):**
+
+```bash
+python manage.py verify_backup_restore --out-dir /var/backups/aster
+```
+
+This command pg_dumps the live database, restores into a throwaway database, checks
+`django_migrations`, runs `migrate --check`, and drops the throwaway DB. CI runs this on
+every merge when Postgres client tools are available.
+
+**Manual drill (monthly):** restore the latest dump into a throwaway database, run
+`migrate --check` and the smoke test above, record the result. See the restore-drill note
+in [disaster-recovery.md](disaster-recovery.md).
+
+**Staging compose:** `docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile staging run --rm verify-restore`
