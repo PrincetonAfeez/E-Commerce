@@ -1,11 +1,80 @@
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.coverage
-htmlcov/
-db.sqlite3
-media/
-staticfiles/
-.env
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
 .venv/
 venv/
+ENV/
+env/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Lint / type check caches
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Django
+db.sqlite3
+*.sqlite3
+media/
+staticfiles/
+local_settings.py
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Generated artifacts
+schema.yml
+
+# Backups & dumps
+backups/
+*.dump
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Node (if added for front-end tooling)
+node_modules/
