@@ -1,4 +1,4 @@
-# Polls the simulated gateway to resolve stranded or abandoned payment attempts
+"""Polls the simulated gateway to resolve stranded or abandoned payment attempts"""
 
 
 from datetime import timedelta

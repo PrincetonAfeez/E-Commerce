@@ -1,4 +1,4 @@
-# Re-drive dead-letter queue items (failed outbox events and webhook deliveries).
+"""Re-drive dead-letter queue items (failed outbox events and webhook deliveries)."""
 from __future__ import annotations
 
 from django.core.management.base import BaseCommand

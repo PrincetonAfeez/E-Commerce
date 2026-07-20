@@ -1,4 +1,4 @@
-# Deletes expired idempotency records and stale carts or checkout attempts
+"""Deletes expired idempotency records and stale carts or checkout attempts"""
 
 from datetime import timedelta
 

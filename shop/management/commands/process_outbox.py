@@ -1,4 +1,4 @@
-# Processes pending outbox events and sends transactional emails with retry backoff
+"""Processes pending outbox events and sends transactional emails with retry backoff"""
 
 from datetime import timedelta
 

@@ -1,4 +1,4 @@
-# Expires active inventory reservations for non-payment checkout attempts
+"""Expires active inventory reservations for non-payment checkout attempts"""
 
 from django.core.management.base import BaseCommand
 

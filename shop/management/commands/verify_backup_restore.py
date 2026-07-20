@@ -1,4 +1,4 @@
-# Round-trip backup verification: pg_dump → pg_restore → schema smoke test.
+"""Round-trip backup verification: pg_dump → pg_restore → schema smoke test."""
 from __future__ import annotations
 
 import os

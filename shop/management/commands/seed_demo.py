@@ -1,4 +1,4 @@
-# Seeds demo catalog products, stock, coupons, plans, and a staff user for development
+"""Seeds demo catalog products, stock, coupons, plans, and a staff user for development"""
 from datetime import timedelta
 from decimal import Decimal
 

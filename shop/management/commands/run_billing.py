@@ -1,4 +1,4 @@
-# Issues this month simulated subscription invoice for each subscribed tenant
+"""Issues this month simulated subscription invoice for each subscribed tenant"""
 from django.core.management.base import BaseCommand
 
 from shop.locks import single_instance

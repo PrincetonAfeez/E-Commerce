@@ -1,4 +1,4 @@
-# Charges and fulfils customer subscriptions whose next renewal date is due
+"""Charges and fulfils customer subscriptions whose next renewal date is due"""
 from django.core.management.base import BaseCommand
 
 from shop.locks import single_instance

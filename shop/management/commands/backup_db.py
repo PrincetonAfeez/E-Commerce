@@ -1,5 +1,4 @@
-# Runs pg_dump to write a compressed Postgres logical backup to disk
-"""Backup the database to a file"""
+"""Runs pg_dump to write a compressed Postgres logical backup to disk"""
 
 import os
 from datetime import datetime, timedelta, timezone

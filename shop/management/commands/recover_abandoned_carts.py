@@ -1,4 +1,4 @@
-# Queues cart recovery emails for active carts abandoned past a threshold
+"""Queues cart recovery emails for active carts abandoned past a threshold"""
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand

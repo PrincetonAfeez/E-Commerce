@@ -1,5 +1,4 @@
-# Remove uploaded media files not referenced by ProductImage or StoreSettings.logo.
-"""Remove orphan media files"""
+"""Remove uploaded media files not referenced by ProductImage or StoreSettings.logo."""
 
 from __future__ import annotations
 

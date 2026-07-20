@@ -1,4 +1,4 @@
-# Enqueues recent outbox events to webhook endpoints and delivers pending ones
+"""Enqueues recent outbox events to webhook endpoints and delivers pending ones"""
 from django.core.management.base import BaseCommand
 
 from shop.locks import single_instance
