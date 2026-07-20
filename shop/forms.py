@@ -1,4 +1,4 @@
-# User registration form with normalized unique email validation
+"""User registration form with normalized unique email validation"""
 from __future__ import annotations
 
 from django import forms
