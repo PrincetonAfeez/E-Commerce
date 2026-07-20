@@ -31,7 +31,7 @@ PCI-compliant provider could be integrated later without reworking order finaliz
 - Password auth with Django's validators; login, registration, and password-reset endpoints
   are rate-limited. The DRF API is throttled (anon + user scopes) and returns HTTP 429 when
   limits are exceeded.
-- Email verification is required and surfaced via a banner until completed.
+- Email verification is required before checkout for registered customers.
 - **Multi-factor authentication (MFA):** not currently implemented. This is a known,
   accepted gap for this deployment; it is the top candidate for the auth roadmap. Operators
   needing MFA today should front the app with an SSO/IdP that enforces it, or restrict
