@@ -1,10 +1,10 @@
-# Cache-backed per-IP rate limit decorator for Django views outside DRF throttling
+"""Cache-backed per-IP rate limit decorator for Django views outside DRF throttling"""
 from __future__ import annotations
 
 import functools
 
 from django.core.cache import cache
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 
 _PERIODS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hour": 3600, "d": 86400}
 
@@ -44,10 +44,13 @@ def ratelimit(scope: str, rate: str = "10/min", methods=("POST",), field: str | 
                     cache.set(key, 1, window)
                     current = 1
                 if current > limit:
-                    return HttpResponse(
-                        "Too many attempts. Please wait a moment and try again.",
-                        status=429,
-                    )
+                    message = "Too many attempts. Please wait a moment and try again."
+                    if "application/json" in request.headers.get("Accept", ""):
+                        return JsonResponse(
+                            {"code": "rate_limited", "message": message, "field_errors": {}},
+                            status=429,
+                        )
+                    return HttpResponse(message, status=429)
             return view(request, *args, **kwargs)
 
         return wrapped
