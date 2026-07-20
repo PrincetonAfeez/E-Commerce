@@ -1,17 +1,39 @@
-# Django ORM models for multi-tenant catalog, checkout, orders, billing, and webhooks
+"""Django ORM models for multi-tenant catalog, checkout, orders, billing, and webhooks"""
 from __future__ import annotations
 
 import uuid
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import F, Q, Sum
+from django.db.models.signals import m2m_changed
 from django.utils import timezone
 from django.utils.text import slugify
 
 from .tenancy import TenantManager, default_tenant_id, get_current_tenant_id
 from .validators import validate_image_upload
+
+
+def _validate_tenant_match(*, expected_tenant_id: int | None, actual_tenant_id: int | None, label: str) -> None:
+    if expected_tenant_id is None and actual_tenant_id is None:
+        return
+    if expected_tenant_id is None:
+        raise ValidationError(f"{label} tenant does not match.")
+    if actual_tenant_id is not None and expected_tenant_id != actual_tenant_id:
+        raise ValidationError(f"{label} tenant does not match.")
+
+
+def _related_tenant_id(instance, field_name: str, model_class: type) -> int | None:
+    fk_id = getattr(instance, f"{field_name}_id", None)
+    if not fk_id:
+        return None
+    related = getattr(instance, field_name, None)
+    if related is not None:
+        return getattr(related, "tenant_id", None)
+    return model_class._base_manager.filter(pk=fk_id).values_list("tenant_id", flat=True).first()
+
 
 MONEY_MAX_DIGITS = 12
 MONEY_DECIMAL_PLACES = 2
@@ -49,10 +71,23 @@ class Tenant(TimeStampedModel):
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["primary_domain"],
+                condition=Q(primary_domain__gt=""),
+                name="unique_tenant_primary_domain_nonempty",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
+        if self.slug:
+            base = self.slug
+            suffix = 1
+            while Tenant.objects.filter(slug=self.slug).exclude(pk=self.pk).exists():
+                self.slug = f"{base}-{suffix}"
+                suffix += 1
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
@@ -64,9 +99,7 @@ class TenantScopedModel(TimeStampedModel):
     manager to the active tenant (see shop.tenancy). ``tenant`` is auto-populated on
     save from the current context, falling back to the default tenant."""
 
-    tenant = models.ForeignKey(
-        Tenant, null=True, blank=True, on_delete=models.CASCADE, related_name="%(class)ss"
-    )
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="%(class)ss")
 
     objects = TenantManager()
 
@@ -75,7 +108,17 @@ class TenantScopedModel(TimeStampedModel):
 
     def save(self, *args, **kwargs):
         if self.tenant_id is None:
-            self.tenant_id = get_current_tenant_id() or default_tenant_id()
+            from django.conf import settings as dj_settings
+
+            tid = get_current_tenant_id()
+            if tid is None:
+                if getattr(dj_settings, "IS_PRODUCTION", False) and not getattr(dj_settings, "RUNNING_TESTS", False):
+                    from django.core.exceptions import ValidationError
+
+                    raise ValidationError("Tenant context is required to save tenant-scoped records.")
+                self.tenant_id = default_tenant_id()
+            else:
+                self.tenant_id = tid
         super().save(*args, **kwargs)
 
 
@@ -83,9 +126,7 @@ class Category(TenantScopedModel):
     name = models.CharField(max_length=120)
     slug = models.SlugField()
     description = models.TextField(blank=True)
-    parent = models.ForeignKey(
-        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="children"
-    )
+    parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="children")
 
     class Meta:
         ordering = ["name"]
@@ -97,6 +138,14 @@ class Category(TenantScopedModel):
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
+        if self.tenant_id is None and self.parent_id:
+            self.tenant_id = _related_tenant_id(self, "parent", Category)
+        if self.parent_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "parent", Category),
+                label="Parent category",
+            )
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
@@ -148,15 +197,12 @@ class Product(TenantScopedModel):
     featured = models.BooleanField(default=False)
     seo_title = models.CharField(max_length=180, blank=True)
     meta_description = models.CharField(max_length=320, blank=True)
-    stock_visibility = models.CharField(
-        max_length=32, choices=StockVisibility, default=StockVisibility.AVAILABILITY
-    )
+    stock_visibility = models.CharField(max_length=32, choices=StockVisibility, default=StockVisibility.AVAILABILITY)
 
     class Meta:
         ordering = ["name"]
         indexes = [
-            models.Index(fields=["status", "featured"]),
-            models.Index(fields=["slug"]),
+            models.Index(fields=["tenant", "status", "featured"]),
         ]
         constraints = [
             models.UniqueConstraint(fields=["tenant", "slug"], name="unique_product_slug_per_tenant"),
@@ -165,26 +211,68 @@ class Product(TenantScopedModel):
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
+        if self.category_id and self.tenant_id:
+            category_tenant_id = (
+                self.category.tenant_id
+                if "category" in self.__dict__ and self.category is not None
+                else Category.objects.filter(pk=self.category_id).values_list("tenant_id", flat=True).first()
+            )
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=category_tenant_id,
+                label="Category",
+            )
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.name
 
 
+def _validate_product_m2m_tenant(*, product: Product, model_class: type, pk_set: set, label: str) -> None:
+    if not pk_set or not product.tenant_id:
+        return
+    if model_class._base_manager.filter(pk__in=pk_set).exclude(tenant_id=product.tenant_id).exists():
+        raise ValidationError(f"{label} tenant does not match.")
+
+
+def _product_collections_changed(sender, instance, action, pk_set, **kwargs):
+    if action in ("pre_add", "pre_set") and pk_set:
+        _validate_product_m2m_tenant(product=instance, model_class=Collection, pk_set=pk_set, label="Collection")
+
+
+def _product_related_changed(sender, instance, action, pk_set, **kwargs):
+    if action in ("pre_add", "pre_set") and pk_set:
+        _validate_product_m2m_tenant(product=instance, model_class=Product, pk_set=pk_set, label="Related product")
+
+
 class ProductImage(TimeStampedModel):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="images")
     image_url = models.URLField(blank=True)
-    image = models.ImageField(
-        upload_to="product-images/", blank=True, validators=[validate_image_upload]
-    )
+    image = models.ImageField(upload_to="product-images/", blank=True, validators=[validate_image_upload])
     alt_text = models.CharField(max_length=180, blank=True)
     sort_order = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ["sort_order", "id"]
-        constraints = [
-            models.UniqueConstraint(fields=["product", "sort_order"], name="unique_product_image_order")
-        ]
+        constraints = [models.UniqueConstraint(fields=["product", "sort_order"], name="unique_product_image_order")]
+
+    def save(self, *args, **kwargs):
+        if self.product_id:
+            product_tenant_id = (
+                self.product.tenant_id
+                if "product" in self.__dict__ and self.product is not None
+                else Product.objects.filter(pk=self.product_id).values_list("tenant_id", flat=True).first()
+            )
+            if product_tenant_id is not None:
+                from shop.tenancy import get_current_tenant_id
+
+                expected = get_current_tenant_id() or product_tenant_id
+                _validate_tenant_match(
+                    expected_tenant_id=expected,
+                    actual_tenant_id=product_tenant_id,
+                    label="Product",
+                )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.alt_text or f"Image for {self.product}"
@@ -207,7 +295,9 @@ class ProductVariant(TenantScopedModel):
     quantity = models.PositiveIntegerField(default=0)
     reorder_point = models.PositiveIntegerField(default=0)
     subscription_interval = models.CharField(
-        max_length=12, blank=True, default="",
+        max_length=12,
+        blank=True,
+        default="",
         choices=[
             ("weekly", "Weekly"),
             ("monthly", "Monthly"),
@@ -227,6 +317,10 @@ class ProductVariant(TenantScopedModel):
         constraints = [
             models.CheckConstraint(condition=Q(quantity__gte=0), name="variant_quantity_nonnegative"),
             models.CheckConstraint(condition=Q(price__gte=0), name="variant_price_nonnegative"),
+            models.CheckConstraint(
+                condition=Q(compare_at_price__isnull=True) | Q(compare_at_price__gte=F("price")),
+                name="variant_compare_at_gte_price",
+            ),
             models.UniqueConstraint(fields=["tenant", "sku"], name="unique_variant_sku_per_tenant"),
         ]
 
@@ -250,15 +344,24 @@ class ProductVariant(TenantScopedModel):
         active_reserved = getattr(self, "active_reserved", None)
         if active_reserved is None:
             active_reserved = (
-                self.reservations.filter(status=Reservation.Status.ACTIVE).aggregate(
-                    total=Sum("quantity")
-                )["total"]
+                self.reservations.filter(status=Reservation.Status.ACTIVE).aggregate(total=Sum("quantity"))["total"]
                 or 0
             )
         return max(self.quantity - active_reserved, 0)
 
     def display_name(self) -> str:
         return self.title or ", ".join(f"{key}: {value}" for key, value in self.attributes.items()) or self.sku
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.product_id:
+            self.tenant_id = _related_tenant_id(self, "product", Product)
+        if self.product_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "product", Product),
+                label="Product",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.product.name} / {self.sku}"
@@ -303,6 +406,20 @@ class Cart(TenantScopedModel):
     def item_count(self) -> int:
         return self.items.aggregate(total=Sum("quantity"))["total"] or 0
 
+    def save(self, *args, **kwargs):
+        if self.coupon_code_id and self.tenant_id:
+            coupon_tenant_id = (
+                self.coupon_code.tenant_id
+                if "coupon_code" in self.__dict__ and self.coupon_code is not None
+                else CouponCode.objects.filter(pk=self.coupon_code_id).values_list("tenant_id", flat=True).first()
+            )
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=coupon_tenant_id,
+                label="Coupon code",
+            )
+        super().save(*args, **kwargs)
+
     def __str__(self) -> str:
         owner = self.user_id or self.session_key or self.token
         return f"Cart {owner}"
@@ -327,6 +444,25 @@ class CartItem(TimeStampedModel):
 
     def line_total(self) -> Decimal:
         return self.unit_price() * self.quantity
+
+    def save(self, *args, **kwargs):
+        if self.cart_id and self.variant_id:
+            cart_tenant_id = (
+                self.cart.tenant_id
+                if "cart" in self.__dict__ and self.cart is not None
+                else Cart.objects.filter(pk=self.cart_id).values_list("tenant_id", flat=True).first()
+            )
+            variant_tenant_id = (
+                self.variant.tenant_id
+                if "variant" in self.__dict__ and self.variant is not None
+                else ProductVariant.objects.filter(pk=self.variant_id).values_list("tenant_id", flat=True).first()
+            )
+            _validate_tenant_match(
+                expected_tenant_id=cart_tenant_id,
+                actual_tenant_id=variant_tenant_id,
+                label="CartItem variant",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.quantity} x {self.variant.sku}"
@@ -354,9 +490,7 @@ class Promotion(TenantScopedModel):
     used_count = models.PositiveIntegerField(default=0)
     per_customer_usage_limit = models.PositiveIntegerField(null=True, blank=True)
     release_redemption_on_refund = models.BooleanField(default=False)
-    auto_apply = models.BooleanField(
-        default=False, help_text="Apply automatically at cart (no code) when eligible."
-    )
+    auto_apply = models.BooleanField(default=False, help_text="Apply automatically at cart (no code) when eligible.")
     priority = models.IntegerField(default=0, help_text="Higher wins when several auto promos qualify.")
 
     class Meta:
@@ -368,6 +502,7 @@ class Promotion(TenantScopedModel):
             ),
             models.CheckConstraint(condition=Q(used_count__gte=0), name="promotion_used_nonnegative"),
             models.CheckConstraint(condition=Q(discount_percent__gte=0), name="promotion_percent_nonnegative"),
+            models.CheckConstraint(condition=Q(discount_percent__lte=100), name="promotion_percent_max_100"),
             models.CheckConstraint(condition=Q(discount_amount__gte=0), name="promotion_amount_nonnegative"),
             models.CheckConstraint(condition=Q(min_subtotal__gte=0), name="promotion_min_subtotal_nonnegative"),
         ]
@@ -385,14 +520,20 @@ class CouponCode(TenantScopedModel):
     class Meta:
         ordering = ["normalized_code"]
         constraints = [
-            models.UniqueConstraint(
-                fields=["tenant", "normalized_code"], name="unique_coupon_code_per_tenant"
-            ),
+            models.UniqueConstraint(fields=["tenant", "normalized_code"], name="unique_coupon_code_per_tenant"),
         ]
 
     def save(self, *args, **kwargs):
         self.normalized_code = normalize_coupon_code(self.code)
         self.code = self.normalized_code
+        if self.tenant_id is None and self.promotion_id:
+            self.tenant_id = _related_tenant_id(self, "promotion", Promotion)
+        if self.promotion_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "promotion", Promotion),
+                label="Promotion",
+            )
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
@@ -429,9 +570,7 @@ class CheckoutAttempt(TenantScopedModel):
     shipping_postal_code = models.CharField(max_length=32, blank=True)
     shipping_country = models.CharField(max_length=2, default="US")
     selected_shipping_method = models.CharField(max_length=80, default="Standard")
-    subtotal = models.DecimalField(
-        max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
-    )
+    subtotal = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero)
     discount_total = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
     )
@@ -441,18 +580,13 @@ class CheckoutAttempt(TenantScopedModel):
     tax_total = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
     )
-    total = models.DecimalField(
-        max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
-    )
+    total = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero)
     credit_applied = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
     )
     currency = models.CharField(max_length=3, default="USD")
     coupon_code = models.ForeignKey(CouponCode, null=True, blank=True, on_delete=models.SET_NULL)
     price_drift_message = models.TextField(blank=True)
-    order = models.OneToOneField(
-        "Order", null=True, blank=True, on_delete=models.SET_NULL, related_name="attempt_pointer"
-    )
     gateway_reference = models.CharField(max_length=120, blank=True, db_index=True)
     payment_started_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(db_index=True)
@@ -475,7 +609,26 @@ class CheckoutAttempt(TenantScopedModel):
             models.CheckConstraint(condition=Q(shipping_total__gte=0), name="attempt_shipping_nonnegative"),
             models.CheckConstraint(condition=Q(tax_total__gte=0), name="attempt_tax_nonnegative"),
             models.CheckConstraint(condition=Q(total__gte=0), name="attempt_total_nonnegative"),
+            models.CheckConstraint(condition=Q(credit_applied__gte=0), name="attempt_credit_nonnegative"),
+            models.CheckConstraint(condition=Q(credit_applied__lte=F("total")), name="attempt_credit_lte_total"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.cart_id:
+            self.tenant_id = _related_tenant_id(self, "cart", Cart)
+        if self.cart_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "cart", Cart),
+                label="Cart",
+            )
+        if self.coupon_code_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "coupon_code", CouponCode),
+                label="Coupon code",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"CheckoutAttempt {self.pk} ({self.status})"
@@ -504,6 +657,26 @@ class CheckoutLineSnapshot(TimeStampedModel):
     def __str__(self) -> str:
         return f"{self.quantity} x {self.sku}"
 
+    def save(self, *args, **kwargs):
+        tenant_ids: list[tuple[str, int | None]] = []
+        if self.variant_id:
+            tenant_ids.append(("Product variant", _related_tenant_id(self, "variant", ProductVariant)))
+        if self.attempt_id:
+            tenant_ids.append(("Checkout attempt", _related_tenant_id(self, "attempt", CheckoutAttempt)))
+        expected: int | None = None
+        for label, actual in tenant_ids:
+            if actual is None:
+                continue
+            if expected is None:
+                expected = actual
+            else:
+                _validate_tenant_match(
+                    expected_tenant_id=expected,
+                    actual_tenant_id=actual,
+                    label=label,
+                )
+        super().save(*args, **kwargs)
+
 
 class Reservation(TimeStampedModel):
     class Status(models.TextChoices):
@@ -514,9 +687,7 @@ class Reservation(TimeStampedModel):
 
     variant = models.ForeignKey(ProductVariant, on_delete=models.PROTECT, related_name="reservations")
     cart = models.ForeignKey(Cart, on_delete=models.PROTECT, related_name="reservations")
-    checkout_attempt = models.ForeignKey(
-        CheckoutAttempt, on_delete=models.CASCADE, related_name="reservations"
-    )
+    checkout_attempt = models.ForeignKey(CheckoutAttempt, on_delete=models.CASCADE, related_name="reservations")
     quantity = models.PositiveIntegerField()
     status = models.CharField(max_length=20, choices=Status, default=Status.ACTIVE, db_index=True)
     expires_at = models.DateTimeField(db_index=True)
@@ -531,6 +702,28 @@ class Reservation(TimeStampedModel):
         constraints = [
             models.CheckConstraint(condition=Q(quantity__gt=0), name="reservation_quantity_positive"),
         ]
+
+    def save(self, *args, **kwargs):
+        tenant_ids: list[tuple[str, int | None]] = []
+        if self.variant_id:
+            tenant_ids.append(("Product variant", _related_tenant_id(self, "variant", ProductVariant)))
+        if self.cart_id:
+            tenant_ids.append(("Cart", _related_tenant_id(self, "cart", Cart)))
+        if self.checkout_attempt_id:
+            tenant_ids.append(("Checkout attempt", _related_tenant_id(self, "checkout_attempt", CheckoutAttempt)))
+        expected: int | None = None
+        for label, actual in tenant_ids:
+            if actual is None:
+                continue
+            if expected is None:
+                expected = actual
+            else:
+                _validate_tenant_match(
+                    expected_tenant_id=expected,
+                    actual_tenant_id=actual,
+                    label=label,
+                )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.quantity} x {self.variant.sku} ({self.status})"
@@ -553,9 +746,7 @@ class InventoryMovement(TimeStampedModel):
     order = models.ForeignKey(
         "Order", null=True, blank=True, on_delete=models.SET_NULL, related_name="inventory_movements"
     )
-    staff_user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
-    )
+    staff_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     note = models.TextField(blank=True)
 
     class Meta:
@@ -577,6 +768,8 @@ class Payment(TimeStampedModel):
         PARTIALLY_REFUNDED = "partially_refunded", "Partially refunded"
         REQUIRES_REFUND = "requires_refund", "Requires refund"
 
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="payments")
+    objects = TenantManager()
     checkout_attempt = models.ForeignKey(CheckoutAttempt, on_delete=models.PROTECT, related_name="payments")
     order = models.ForeignKey("Order", null=True, blank=True, on_delete=models.SET_NULL, related_name="payments")
     amount = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
@@ -587,26 +780,58 @@ class Payment(TimeStampedModel):
     safe_display = models.CharField(max_length=120, blank=True)
     raw_status = models.CharField(max_length=80, blank=True)
     failure_code = models.CharField(max_length=80, blank=True)
+    provider = models.CharField(max_length=32, default="simulated", db_index=True)
 
     class Meta:
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["checkout_attempt", "status"]),
             models.Index(fields=["gateway_reference"]),
+            models.Index(fields=["tenant", "status"]),
         ]
         constraints = [
             models.UniqueConstraint(
                 fields=["checkout_attempt", "idempotency_key"],
                 name="unique_payment_idempotency_per_attempt",
             ),
+            models.UniqueConstraint(
+                fields=["checkout_attempt"],
+                condition=Q(status="pending"),
+                name="unique_pending_payment_per_attempt",
+            ),
             models.CheckConstraint(condition=Q(amount__gte=0), name="payment_amount_nonnegative"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.checkout_attempt_id:
+            self.tenant_id = (
+                self.checkout_attempt.tenant_id
+                if "checkout_attempt" in self.__dict__ and self.checkout_attempt is not None
+                else CheckoutAttempt.objects.filter(pk=self.checkout_attempt_id)
+                .values_list("tenant_id", flat=True)
+                .first()
+            )
+        if self.checkout_attempt_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "checkout_attempt", CheckoutAttempt),
+                label="Checkout attempt",
+            )
+        if self.order_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "order", Order),
+                label="Order",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"Payment {self.gateway_reference or self.pk} ({self.status})"
 
 
 class PaymentEvent(TimeStampedModel):
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="payment_events")
+    objects = TenantManager()
     payment = models.ForeignKey(Payment, null=True, blank=True, on_delete=models.SET_NULL, related_name="events")
     checkout_attempt = models.ForeignKey(
         CheckoutAttempt, null=True, blank=True, on_delete=models.SET_NULL, related_name="payment_events"
@@ -616,10 +841,34 @@ class PaymentEvent(TimeStampedModel):
     payload = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=32, blank=True)
     processing_result = models.TextField(blank=True)
+    provider = models.CharField(max_length=32, default="simulated", db_index=True)
+    provider_event_id = models.CharField(max_length=160, blank=True, db_index=True)
 
     class Meta:
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["gateway_reference", "event_type"])]
+        indexes = [
+            models.Index(fields=["gateway_reference", "event_type"]),
+            models.Index(fields=["tenant", "created_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "provider", "provider_event_id"],
+                condition=~Q(provider_event_id=""),
+                name="unique_payment_event_per_provider",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None:
+            if self.payment_id:
+                self.tenant_id = Payment.objects.filter(pk=self.payment_id).values_list("tenant_id", flat=True).first()
+            elif self.checkout_attempt_id:
+                self.tenant_id = (
+                    CheckoutAttempt.objects.filter(pk=self.checkout_attempt_id)
+                    .values_list("tenant_id", flat=True)
+                    .first()
+                )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.event_type} {self.gateway_reference}"
@@ -634,16 +883,12 @@ class Order(TenantScopedModel):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="orders"
     )
-    checkout_attempt = models.OneToOneField(
-        CheckoutAttempt, on_delete=models.PROTECT, related_name="order_record"
-    )
+    checkout_attempt = models.OneToOneField(CheckoutAttempt, on_delete=models.PROTECT, related_name="order_record")
     order_number = models.CharField(max_length=40, unique=True, default=generate_order_number)
     order_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     guest_email = models.EmailField(blank=True)
     status = models.CharField(max_length=20, choices=Status, default=Status.PLACED, db_index=True)
-    subtotal = models.DecimalField(
-        max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
-    )
+    subtotal = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero)
     discount_total = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
     )
@@ -653,9 +898,7 @@ class Order(TenantScopedModel):
     tax_total = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
     )
-    total = models.DecimalField(
-        max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
-    )
+    total = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero)
     refund_total = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
     )
@@ -687,6 +930,9 @@ class Order(TenantScopedModel):
             models.CheckConstraint(condition=Q(tax_total__gte=0), name="order_tax_nonnegative"),
             models.CheckConstraint(condition=Q(total__gte=0), name="order_total_nonnegative"),
             models.CheckConstraint(condition=Q(refund_total__gte=0), name="order_refund_nonnegative"),
+            models.CheckConstraint(condition=Q(credit_applied__gte=0), name="order_credit_nonnegative"),
+            models.CheckConstraint(condition=Q(credit_applied__lte=F("total")), name="order_credit_lte_total"),
+            models.CheckConstraint(condition=Q(refund_total__lte=F("total")), name="order_refund_lte_total"),
         ]
 
     @property
@@ -715,6 +961,23 @@ class Order(TenantScopedModel):
         if payment and payment.status in {Payment.Status.CONFIRMED, Payment.Status.PARTIALLY_REFUNDED}:
             return "paid"
         return "pending"
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.checkout_attempt_id:
+            self.tenant_id = _related_tenant_id(self, "checkout_attempt", CheckoutAttempt)
+        if self.checkout_attempt_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "checkout_attempt", CheckoutAttempt),
+                label="Checkout attempt",
+            )
+        if self.coupon_code_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "coupon_code", CouponCode),
+                label="Coupon code",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.order_number
@@ -750,6 +1013,15 @@ class OrderItem(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.quantity} x {self.sku}"
+
+    def save(self, *args, **kwargs):
+        if self.variant_id:
+            _validate_tenant_match(
+                expected_tenant_id=_related_tenant_id(self, "order", Order),
+                actual_tenant_id=_related_tenant_id(self, "variant", ProductVariant),
+                label="Product variant",
+            )
+        super().save(*args, **kwargs)
 
 
 class Fulfillment(TimeStampedModel):
@@ -789,6 +1061,8 @@ class OrderStatusEvent(TimeStampedModel):
 
 
 class PromotionRedemption(TimeStampedModel):
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="promotion_redemptions")
+    objects = TenantManager()
     promotion = models.ForeignKey(Promotion, on_delete=models.PROTECT, related_name="redemptions")
     coupon_code = models.ForeignKey(CouponCode, null=True, blank=True, on_delete=models.SET_NULL)
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="promotion_redemptions")
@@ -806,9 +1080,28 @@ class PromotionRedemption(TimeStampedModel):
             models.Index(fields=["promotion", "user", "released"]),
         ]
         constraints = [
-            models.UniqueConstraint(fields=["promotion", "order"], name="unique_promotion_redemption_order"),
+            models.UniqueConstraint(
+                fields=["tenant", "order", "promotion"], name="unique_promotion_redemption_per_tenant"
+            ),
             models.UniqueConstraint(fields=["coupon_code", "order"], name="unique_coupon_redemption_order"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.order_id:
+            self.tenant_id = Order.objects.filter(pk=self.order_id).values_list("tenant_id", flat=True).first()
+        if self.promotion_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "promotion", Promotion),
+                label="Promotion",
+            )
+        if self.order_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "order", Order),
+                label="Order",
+            )
+        super().save(*args, **kwargs)
 
 
 class OrderDiscountSnapshot(TimeStampedModel):
@@ -838,6 +1131,7 @@ class Refund(TimeStampedModel):
     restock = models.BooleanField(default=False)
     reason = models.TextField(blank=True)
     allocation_payload = models.JSONField(default=dict, blank=True)
+    gateway_reference = models.CharField(max_length=120, blank=True, db_index=True)
 
     class Meta:
         permissions = [("process_refunds", "Can create refunds")]
@@ -845,6 +1139,17 @@ class Refund(TimeStampedModel):
             models.UniqueConstraint(fields=["payment", "idempotency_key"], name="unique_refund_idempotency"),
             models.CheckConstraint(condition=Q(amount__gt=0), name="refund_amount_positive"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.payment_id and self.order_id:
+            payment_order_id = (
+                self.payment.order_id
+                if "payment" in self.__dict__ and self.payment is not None
+                else Payment.objects.filter(pk=self.payment_id).values_list("order_id", flat=True).first()
+            )
+            if payment_order_id is not None and payment_order_id != self.order_id:
+                raise ValidationError("Payment does not belong to this order.")
+        super().save(*args, **kwargs)
 
 
 class RefundLine(TimeStampedModel):
@@ -886,9 +1191,12 @@ class OutboxEvent(TenantScopedModel):
 class EmailDelivery(TimeStampedModel):
     class Status(models.TextChoices):
         QUEUED = "queued", "Queued"
+        SENDING = "sending", "Sending"
         SENT = "sent", "Sent"
         FAILED = "failed", "Failed"
 
+    tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.CASCADE, related_name="email_deliveries")
+    objects = TenantManager()
     outbox_event = models.ForeignKey(OutboxEvent, null=True, blank=True, on_delete=models.SET_NULL)
     order = models.ForeignKey(Order, null=True, blank=True, on_delete=models.SET_NULL)
     to_email_hash = models.CharField(max_length=128, blank=True)
@@ -897,18 +1205,39 @@ class EmailDelivery(TimeStampedModel):
     error = models.TextField(blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
 
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None:
+            if self.order_id:
+                self.tenant_id = Order.objects.filter(pk=self.order_id).values_list("tenant_id", flat=True).first()
+            elif self.outbox_event_id:
+                self.tenant_id = (
+                    OutboxEvent.objects.filter(pk=self.outbox_event_id).values_list("tenant_id", flat=True).first()
+                )
+            if self.tenant_id is None:
+                tid = get_current_tenant_id()
+                if tid is not None:
+                    self.tenant_id = tid
+        super().save(*args, **kwargs)
 
-class EmailSuppression(TimeStampedModel):
+
+class EmailSuppression(TenantScopedModel):
     """Emails that have unsubscribed from marketing (e.g. cart-recovery)."""
 
-    email = models.EmailField(unique=True)
+    email = models.EmailField()
     reason = models.CharField(max_length=80, default="unsubscribe")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "email"], name="unique_suppression_per_tenant"),
+        ]
 
     def __str__(self) -> str:
         return self.email
 
 
 class AuditLog(TimeStampedModel):
+    tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.CASCADE, related_name="audit_logs")
+    objects = TenantManager()
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     action = models.CharField(max_length=120)
     object_type = models.CharField(max_length=80)
@@ -920,18 +1249,32 @@ class AuditLog(TimeStampedModel):
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["object_type", "object_id", "created_at"])]
 
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None:
+            tid = get_current_tenant_id()
+            if tid is not None:
+                self.tenant_id = tid
+        super().save(*args, **kwargs)
+
 
 class CustomerGroup(TenantScopedModel):
     """A B2B / segment pricing tier (e.g. Wholesale) — see PriceListEntry + percent_off."""
 
     name = models.CharField(max_length=120)
     percent_off = models.DecimalField(
-        max_digits=5, decimal_places=2, default=Decimal("0.00"),
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
         help_text="Blanket % off base price for members (overridden by price-list entries).",
     )
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "name"], name="unique_customer_group_name_per_tenant"),
+            models.CheckConstraint(condition=Q(percent_off__gte=0), name="customer_group_percent_nonnegative"),
+            models.CheckConstraint(condition=Q(percent_off__lte=100), name="customer_group_percent_max_100"),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -947,7 +1290,25 @@ class PriceListEntry(TenantScopedModel):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["group", "variant"], name="unique_price_entry_group_variant"),
+            models.CheckConstraint(condition=Q(price__gte=0), name="price_list_entry_nonnegative"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.group_id:
+            self.tenant_id = _related_tenant_id(self, "group", CustomerGroup)
+        if self.group_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "group", CustomerGroup),
+                label="Customer group",
+            )
+        if self.variant_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "variant", ProductVariant),
+                label="Product variant",
+            )
+        super().save(*args, **kwargs)
 
 
 class CustomerSubscription(TenantScopedModel):
@@ -959,18 +1320,14 @@ class CustomerSubscription(TenantScopedModel):
         PAST_DUE = "past_due", "Past due"
         CANCELLED = "cancelled", "Cancelled"
 
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="subscriptions"
-    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="subscriptions")
     variant = models.ForeignKey(ProductVariant, on_delete=models.PROTECT, related_name="customer_subscriptions")
     quantity = models.PositiveIntegerField(default=1)
     interval = models.CharField(max_length=12)
     status = models.CharField(max_length=20, choices=Status, default=Status.ACTIVE, db_index=True)
     unit_price = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
     next_renewal_at = models.DateTimeField(db_index=True)
-    last_order = models.ForeignKey(
-        "Order", null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
-    )
+    last_order = models.ForeignKey("Order", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 
     class Meta:
         ordering = ["-created_at"]
@@ -982,6 +1339,17 @@ class CustomerSubscription(TenantScopedModel):
             ),
         ]
 
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.variant_id:
+            self.tenant_id = _related_tenant_id(self, "variant", ProductVariant)
+        if self.variant_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "variant", ProductVariant),
+                label="Product variant",
+            )
+        super().save(*args, **kwargs)
+
     def __str__(self) -> str:
         return f"Sub<{self.user_id}> {self.variant.sku} ({self.status})"
 
@@ -989,25 +1357,48 @@ class CustomerSubscription(TenantScopedModel):
 class AccountProfile(TimeStampedModel):
     """Per-account metadata not on the default User model (email verification, §9)."""
 
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile"
-    )
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
     email_verified = models.BooleanField(default=False)
     email_verified_at = models.DateTimeField(null=True, blank=True)
-    customer_group = models.ForeignKey(
-        CustomerGroup, null=True, blank=True, on_delete=models.SET_NULL, related_name="members"
-    )
 
     def __str__(self) -> str:
         return f"Profile<{self.user_id}> verified={self.email_verified}"
 
 
+class TenantCustomerProfile(TenantScopedModel):
+    """Per-tenant customer segment (B2B group) for a user."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="tenant_customer_profiles"
+    )
+    customer_group = models.ForeignKey(
+        CustomerGroup, null=True, blank=True, on_delete=models.SET_NULL, related_name="tenant_members"
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "user"], name="unique_customer_profile_per_tenant"),
+        ]
+
+    def __str__(self) -> str:
+        return f"TenantCustomer<{self.user_id}@{self.tenant_id}>"
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.customer_group_id:
+            self.tenant_id = _related_tenant_id(self, "customer_group", CustomerGroup)
+        if self.customer_group_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "customer_group", CustomerGroup),
+                label="Customer group",
+            )
+        super().save(*args, **kwargs)
+
+
 class Address(TenantScopedModel):
     """A customer's saved shipping address (reusable across checkouts)."""
 
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="addresses"
-    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="addresses")
     label = models.CharField(max_length=60, blank=True)
     name = models.CharField(max_length=180)
     address1 = models.CharField(max_length=180)
@@ -1022,15 +1413,20 @@ class Address(TenantScopedModel):
     class Meta:
         ordering = ["-is_default", "-updated_at"]
         indexes = [models.Index(fields=["user", "is_default"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "user"],
+                condition=Q(is_default=True),
+                name="unique_default_address_per_user",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.name} — {self.city}"
 
 
 class WishlistItem(TenantScopedModel):
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wishlist_items"
-    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wishlist_items")
     variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name="wishlisted_by")
 
     class Meta:
@@ -1038,6 +1434,17 @@ class WishlistItem(TenantScopedModel):
         constraints = [
             models.UniqueConstraint(fields=["user", "variant"], name="unique_wishlist_user_variant"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.variant_id:
+            self.tenant_id = _related_tenant_id(self, "variant", ProductVariant)
+        if self.variant_id:
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=_related_tenant_id(self, "variant", ProductVariant),
+                label="Product variant",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"Wishlist<{self.user_id}> {self.variant.sku}"
@@ -1059,15 +1466,27 @@ class Review(TenantScopedModel):
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["product", "approved", "created_at"])]
         constraints = [
-            models.CheckConstraint(
-                condition=Q(rating__gte=1) & Q(rating__lte=5), name="review_rating_1_to_5"
-            ),
+            models.CheckConstraint(condition=Q(rating__gte=1) & Q(rating__lte=5), name="review_rating_1_to_5"),
             models.UniqueConstraint(
                 fields=["product", "user"],
                 condition=Q(user__isnull=False),
                 name="unique_review_per_user_product",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.product_id and self.tenant_id:
+            product_tenant_id = (
+                self.product.tenant_id
+                if "product" in self.__dict__ and self.product is not None
+                else Product.objects.filter(pk=self.product_id).values_list("tenant_id", flat=True).first()
+            )
+            _validate_tenant_match(
+                expected_tenant_id=self.tenant_id,
+                actual_tenant_id=product_tenant_id,
+                label="Product",
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.product.name} · {self.rating}★"
@@ -1079,9 +1498,7 @@ class StoreSettings(TenantScopedModel):
     store_name = models.CharField(max_length=120, default="Aster Commerce")
     tagline = models.CharField(max_length=200, blank=True)
     support_email = models.EmailField(blank=True)
-    logo = models.ImageField(
-        upload_to="branding/", blank=True, validators=[validate_image_upload]
-    )
+    logo = models.ImageField(upload_to="branding/", blank=True, validators=[validate_image_upload])
     primary_color = models.CharField(max_length=9, default="#3b6fe6")
     accent_color = models.CharField(max_length=9, default="#245c24")
     currency = models.CharField(max_length=3, default="USD")
@@ -1110,9 +1527,7 @@ class TenantMembership(TenantScopedModel):
         MANAGER = "manager", "Manager"
         STAFF = "staff", "Staff"
 
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="tenant_memberships"
-    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="tenant_memberships")
     role = models.CharField(max_length=20, choices=Role, default=Role.STAFF)
 
     class Meta:
@@ -1199,7 +1614,7 @@ class Invoice(TenantScopedModel):
 
 
 class GiftCard(TenantScopedModel):
-    code = models.CharField(max_length=40, unique=True)
+    code = models.CharField(max_length=40)
     initial_balance = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
     balance = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
     currency = models.CharField(max_length=3, default="USD")
@@ -1211,6 +1626,11 @@ class GiftCard(TenantScopedModel):
         ordering = ["-created_at"]
         constraints = [
             models.CheckConstraint(condition=Q(balance__gte=0), name="gift_card_balance_nonnegative"),
+            models.CheckConstraint(
+                condition=Q(balance__lte=F("initial_balance")),
+                name="gift_card_balance_lte_initial",
+            ),
+            models.UniqueConstraint(fields=["tenant", "code"], name="unique_gift_card_code_per_tenant"),
         ]
 
     def save(self, *args, **kwargs):
@@ -1221,21 +1641,18 @@ class GiftCard(TenantScopedModel):
         return f"{self.code} (${self.balance})"
 
 
-class StoreCredit(TimeStampedModel):
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="store_credit"
-    )
-    balance = models.DecimalField(
-        max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero
-    )
+class StoreCredit(TenantScopedModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="store_credits")
+    balance = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES, default=money_zero)
 
     class Meta:
         constraints = [
             models.CheckConstraint(condition=Q(balance__gte=0), name="store_credit_balance_nonnegative"),
+            models.UniqueConstraint(fields=["tenant", "user"], name="unique_store_credit_per_tenant"),
         ]
 
     def __str__(self) -> str:
-        return f"StoreCredit<{self.user_id}> ${self.balance}"
+        return f"StoreCredit<{self.user_id}@{self.tenant_id}> ${self.balance}"
 
 
 class StoreCreditTransaction(TimeStampedModel):
@@ -1247,20 +1664,39 @@ class StoreCreditTransaction(TimeStampedModel):
         REFUND_CREDIT = "refund_credit", "Refunded to credit"
         MANUAL = "manual", "Manual adjustment"
 
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="store_credit_transactions")
+    objects = TenantManager()
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="store_credit_transactions"
+    )
+    store_credit = models.ForeignKey(
+        StoreCredit, null=True, blank=True, on_delete=models.CASCADE, related_name="transactions"
     )
     delta = models.DecimalField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
     reason = models.CharField(max_length=30, choices=Reason)
     order = models.ForeignKey("Order", null=True, blank=True, on_delete=models.SET_NULL)
-    checkout_attempt = models.ForeignKey(
-        CheckoutAttempt, null=True, blank=True, on_delete=models.SET_NULL
-    )
+    checkout_attempt = models.ForeignKey(CheckoutAttempt, null=True, blank=True, on_delete=models.SET_NULL)
     note = models.CharField(max_length=180, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["user", "created_at"])]
+        indexes = [models.Index(fields=["user", "created_at"]), models.Index(fields=["tenant", "created_at"])]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None:
+            if self.store_credit_id:
+                self.tenant_id = (
+                    StoreCredit.objects.filter(pk=self.store_credit_id).values_list("tenant_id", flat=True).first()
+                )
+            elif self.checkout_attempt_id:
+                self.tenant_id = (
+                    CheckoutAttempt.objects.filter(pk=self.checkout_attempt_id)
+                    .values_list("tenant_id", flat=True)
+                    .first()
+                )
+            elif self.order_id:
+                self.tenant_id = Order.objects.filter(pk=self.order_id).values_list("tenant_id", flat=True).first()
+        super().save(*args, **kwargs)
 
 
 class ReturnRequest(TimeStampedModel):
@@ -1274,6 +1710,8 @@ class ReturnRequest(TimeStampedModel):
         REFUNDED = "refunded", "Refunded"
         CANCELLED = "cancelled", "Cancelled"
 
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="return_requests")
+    objects = TenantManager()
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="return_requests")
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="return_requests"
@@ -1287,6 +1725,11 @@ class ReturnRequest(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if self.tenant_id is None and self.order_id:
+            self.tenant_id = Order.objects.filter(pk=self.order_id).values_list("tenant_id", flat=True).first()
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"Return<{self.pk}> {self.order.order_number} ({self.status})"
@@ -1302,6 +1745,26 @@ class ReturnLine(TimeStampedModel):
             models.CheckConstraint(condition=Q(quantity__gt=0), name="return_line_quantity_positive"),
         ]
 
+    def save(self, *args, **kwargs):
+        if self.return_request_id and self.order_item_id:
+            return_order_id = (
+                self.return_request.order_id
+                if "return_request" in self.__dict__ and self.return_request is not None
+                else ReturnRequest.objects.filter(pk=self.return_request_id).values_list("order_id", flat=True).first()
+            )
+            order_item_order_id = (
+                self.order_item.order_id
+                if "order_item" in self.__dict__ and self.order_item is not None
+                else OrderItem.objects.filter(pk=self.order_item_id).values_list("order_id", flat=True).first()
+            )
+            if (
+                return_order_id is not None
+                and order_item_order_id is not None
+                and return_order_id != order_item_order_id
+            ):
+                raise ValidationError("Order item does not belong to this return request's order.")
+        super().save(*args, **kwargs)
+
 
 class WebhookEndpoint(TenantScopedModel):
     """A merchant-registered URL that receives signed domain-event callbacks."""
@@ -1309,9 +1772,7 @@ class WebhookEndpoint(TenantScopedModel):
     url = models.URLField()
     secret = models.CharField(max_length=120, help_text="Used to HMAC-sign payloads.")
     description = models.CharField(max_length=180, blank=True)
-    event_types = models.JSONField(
-        default=list, blank=True, help_text="Subscribed event types; empty = all."
-    )
+    event_types = models.JSONField(default=list, blank=True, help_text="Subscribed event types; empty = all.")
     active = models.BooleanField(default=True)
 
     class Meta:
@@ -1344,9 +1805,7 @@ class WebhookDelivery(TimeStampedModel):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            models.UniqueConstraint(
-                fields=["endpoint", "outbox_event"], name="unique_webhook_delivery_per_event"
-            ),
+            models.UniqueConstraint(fields=["endpoint", "outbox_event"], name="unique_webhook_delivery_per_event"),
         ]
 
 
@@ -1363,6 +1822,7 @@ class TaxRate(TenantScopedModel):
     class Meta:
         ordering = ["-priority", "country", "region"]
         indexes = [models.Index(fields=["active", "country", "region"])]
+        constraints = [models.CheckConstraint(condition=Q(rate__gte=0), name="tax_rate_nonnegative")]
 
     def __str__(self) -> str:
         return f"{self.country}/{self.region or '*'} {self.rate}"
@@ -1388,11 +1848,46 @@ class ShippingRate(TenantScopedModel):
     class Meta:
         ordering = ["sort_order", "method"]
         constraints = [
+            models.UniqueConstraint(fields=["tenant", "method"], name="unique_shipping_rate_method_per_tenant"),
             models.CheckConstraint(condition=Q(flat_amount__gte=0), name="shipping_rate_amount_nonnegative"),
         ]
 
     def __str__(self) -> str:
         return f"{self.method} ${self.flat_amount}"
+
+
+class InboundGatewayEvent(TimeStampedModel):
+    """Raw inbound PSP webhook payload awaiting or after processing."""
+
+    class Status(models.TextChoices):
+        RECEIVED = "received", "Received"
+        PROCESSED = "processed", "Processed"
+        FAILED = "failed", "Failed"
+        IGNORED = "ignored", "Ignored"
+
+    tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
+    provider = models.CharField(max_length=32, db_index=True)
+    provider_event_id = models.CharField(max_length=160, blank=True, db_index=True)
+    event_type = models.CharField(max_length=80, blank=True)
+    gateway_reference = models.CharField(max_length=120, blank=True, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    signature = models.CharField(max_length=256, blank=True)
+    status = models.CharField(max_length=20, choices=Status, default=Status.RECEIVED, db_index=True)
+    processing_result = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["provider", "status", "created_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_event_id"],
+                condition=~Q(provider_event_id=""),
+                name="unique_inbound_gateway_event",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.provider}:{self.event_type or self.provider_event_id}"
 
 
 class SimulatedGatewayIntent(TimeStampedModel):
@@ -1417,6 +1912,8 @@ class IdempotencyRecord(TimeStampedModel):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="idempotency_records")
+    objects = TenantManager()
     scope = models.CharField(max_length=80)
     key = models.CharField(max_length=120)
     actor_hash = models.CharField(max_length=128)
@@ -1430,5 +1927,13 @@ class IdempotencyRecord(TimeStampedModel):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            models.UniqueConstraint(fields=["scope", "key", "actor_hash"], name="unique_idempotency_record")
+            models.UniqueConstraint(
+                fields=["scope", "key", "actor_hash", "tenant"],
+                name="unique_idempotency_record",
+            ),
         ]
+        indexes = [models.Index(fields=["expires_at"])]
+
+
+m2m_changed.connect(_product_collections_changed, sender=Product.collections.through)
+m2m_changed.connect(_product_related_changed, sender=Product.related_products.through)
