@@ -5,8 +5,6 @@ services:
       POSTGRES_DB: commerce
       POSTGRES_USER: commerce
       POSTGRES_PASSWORD: commerce
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,21 +13,130 @@ services:
       timeout: 5s
       retries: 5
 
-  web:
-    build: .
-    # Entrypoint runs migrations; CMD (gunicorn) is inherited from the image.
-    environment:
-      DJANGO_ENV: production
-      DJANGO_DEBUG: "0"
-      DJANGO_SECRET_KEY: docker-compose-dev-secret-change-me
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,web
-      DJANGO_SECURE_SSL_REDIRECT: "0"
-      DATABASE_URL: postgres://commerce:commerce@db:5432/commerce
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Dev-only host port bindings for psql / redis-cli. Usage: docker compose --profile dev up
+  db-dev-ports:
+    image: alpine:3
+    command: sleep infinity
+    network_mode: service:db
     ports:
-      - "8000:8000"
+      - "5432:5432"
+    profiles:
+      - dev
     depends_on:
       db:
         condition: service_healthy
 
+  redis-dev-ports:
+    image: alpine:3
+    command: sleep infinity
+    network_mode: service:redis
+    ports:
+      - "6379:6379"
+    profiles:
+      - dev
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  web:
+    build: .
+    restart: unless-stopped
+    environment:
+      RUN_MIGRATIONS: "1"
+      DJANGO_ENV: development
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-docker-compose-dev-secret-change-me}
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,web
+      DJANGO_SECURE_SSL_REDIRECT: "0"
+      DJANGO_SITE_URL: http://localhost:8000
+      DJANGO_EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      DATABASE_URL: postgres://commerce:commerce@db:5432/commerce
+      CACHE_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["sh", "/app/scripts/worker-loop.sh"]
+    environment:
+      DJANGO_ENV: development
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-docker-compose-dev-secret-change-me}
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,web
+      DJANGO_SITE_URL: http://localhost:8000
+      DJANGO_EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      DATABASE_URL: postgres://commerce:commerce@db:5432/commerce
+      CACHE_URL: redis://redis:6379/0
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/worker-heartbeat && find /tmp/worker-heartbeat -mmin -5 | grep -q ."]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  backup:
+    build: .
+    restart: unless-stopped
+    command: >
+      sh -c "while true; do
+        if python manage.py backup_db --out-dir /backups; then
+          date -Iseconds > /tmp/backup-heartbeat;
+        else
+          echo 'backup_db failed' >&2;
+        fi;
+        sleep 86400;
+      done"
+    environment:
+      DJANGO_ENV: development
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-docker-compose-dev-secret-change-me}
+      DATABASE_URL: postgres://commerce:commerce@db:5432/commerce
+      CACHE_URL: redis://redis:6379/0
+      BACKUP_DIR: /backups
+    volumes:
+      - backup_data:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/backup-heartbeat && find /tmp/backup-heartbeat -mmin -1445 | grep -q ."]
+      interval: 300s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
 volumes:
   postgres_data:
+  media_data:
+  backup_data:
