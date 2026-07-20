@@ -1,0 +1,63 @@
+# Staging overlay — production-like security with staging-specific env file.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile staging up -d
+services:
+  web:
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "0"
+      DJANGO_SECURE_SSL_REDIRECT: "1"
+      DJANGO_EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      GATEWAY_TEST_MODES_ENABLED: "0"
+      REQUIRE_TENANT_CONTEXT: "1"
+      RUN_MIGRATIONS: "1"
+      PAYMENT_GATEWAY: simulated
+    env_file:
+      - path: .env.staging
+        required: false
+    profiles:
+      - staging
+
+  worker:
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "0"
+      GATEWAY_TEST_MODES_ENABLED: "0"
+      REQUIRE_TENANT_CONTEXT: "1"
+      RETENTION_DAYS: "365"
+    env_file:
+      - path: .env.staging
+        required: false
+    profiles:
+      - staging
+
+  backup:
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "0"
+      REQUIRE_TENANT_CONTEXT: "1"
+      BACKUP_DIR: /backups
+    env_file:
+      - path: .env.staging
+        required: false
+    profiles:
+      - staging
+
+  verify-restore:
+    build: .
+    profiles:
+      - staging
+    environment:
+      DJANGO_ENV: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-staging-verify-secret-change-me}
+      DATABASE_URL: postgres://commerce:commerce@db:5432/commerce
+      CACHE_URL: redis://redis:6379/0
+      BACKUP_DIR: /backups
+    volumes:
+      - backup_data:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py verify_backup_restore --out-dir /backups"
+    restart: "no"
