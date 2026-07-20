@@ -1,5 +1,5 @@
 # ADR-0004: Gateway-Authoritative Reconciliation
-
+ 
 ## Status
 Accepted
 

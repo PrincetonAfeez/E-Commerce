@@ -1,5 +1,5 @@
 # ADR-0002: Reservation-Based Inventory
-
+ 
 ## Status
 Accepted
 

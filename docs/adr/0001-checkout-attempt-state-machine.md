@@ -1,5 +1,6 @@
 # ADR-0001: CheckoutAttempt Anchors Checkout Finalization
 
+
 ## Status
 Accepted
 

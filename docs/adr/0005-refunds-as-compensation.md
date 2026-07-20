@@ -1,5 +1,5 @@
 # ADR-0005: Refunds Are Compensating Transactions
-
+ 
 ## Status
 Accepted
 
