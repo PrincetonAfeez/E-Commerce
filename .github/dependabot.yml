@@ -1,22 +1,57 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
-    directory: "/"
+  - package-ecosystem: pip
+    directory: /
     schedule:
-      interval: "weekly"
+      interval: weekly
+      day: monday
     open-pull-requests-limit: 10
     groups:
-      python-minor-patch:
+      python-runtime:
+        patterns:
+          - django
+          - djangorestframework
+          - gunicorn
+          - whitenoise
         update-types:
-          - "minor"
-          - "patch"
+          - minor
+          - patch
+      python-deps:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - django
+          - djangorestframework
+          - gunicorn
+          - whitenoise
+        update-types:
+          - minor
+          - patch
+      python-dev:
+        patterns:
+          - pytest*
+          - ruff
+          - coverage*
+        update-types:
+          - minor
+          - patch
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
+  - package-ecosystem: github-actions
+    directory: /
     schedule:
-      interval: "weekly"
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
-  - package-ecosystem: "docker"
-    directory: "/"
+  - package-ecosystem: docker
+    directory: /
     schedule:
-      interval: "weekly"
+      interval: weekly
+      day: monday
+    groups:
+      docker-images:
+        patterns:
+          - "*"

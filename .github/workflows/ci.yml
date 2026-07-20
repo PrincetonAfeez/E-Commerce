@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,10 +27,22 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
       DATABASE_URL: postgres://commerce:commerce@localhost:5432/commerce
+      CACHE_URL: redis://localhost:6379/0
       DJANGO_SECRET_KEY: ci-secret-key
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      PAYMENT_GATEWAY: simulated
 
     steps:
       - uses: actions/checkout@v4
@@ -34,26 +50,77 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff
+          pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Validate docker compose
+        run: docker compose config --quiet
+
+      - name: Validate prod compose merge
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod config --quiet
+
+      - name: Validate staging compose merge
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile staging config --quiet
+
+      - name: Install Postgres client tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       - name: Check for missing migrations
-        run: python manage.py makemigrations --check --dry-run
+        run: |
+          python manage.py migrate --noinput
+          python manage.py makemigrations --check --dry-run
 
-      - name: Run tests (PostgreSQL)
-        run: pytest -q
+      - name: Verify backup restore round-trip
+        run: python manage.py verify_backup_restore --out-dir /tmp/backups
+
+      - name: Run tests with coverage (PostgreSQL)
+        run: |
+          pytest shop/tests/ \
+            --cov=shop \
+            --cov=config \
+            --cov-report=term-missing \
+            --cov-fail-under=85
 
       - name: Django deployment security check
         env:
           DJANGO_ENV: production
+          DJANGO_SECRET_KEY: ci-secret-key-for-deploy-check-only-32chars
+          DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+          DJANGO_SITE_URL: https://localhost
+          DATABASE_URL: postgres://commerce:commerce@localhost:5432/commerce
+          CACHE_URL: redis://127.0.0.1:6379/0
+          AWS_STORAGE_BUCKET_NAME: ci-media-bucket
+          AWS_ACCESS_KEY_ID: ci-test-key
+          AWS_SECRET_ACCESS_KEY: ci-test-secret
+          TLS_CHECK_SECRET: ci-tls-check-secret
+          OPS_METRICS_SECRET: ci-metrics-secret
+          PAYMENT_WEBHOOK_SECRET: ci-webhook-secret
+          PAYMENT_GATEWAY: simulated
+          DJANGO_EMAIL_HOST: smtp.example.com
         run: python manage.py check --deploy --fail-level ERROR
+
+      - name: Load smoke (core read endpoints)
+        run: |
+          python manage.py runserver 127.0.0.1:8765 &
+          SERVER_PID=$!
+          sleep 5
+          python scripts/load_smoke.py http://127.0.0.1:8765 30 10
+          kill $SERVER_PID
 
       - name: OpenAPI schema generation
         run: python manage.py spectacular --file schema.yml --validate
+
+      - name: Docker image build
+        run: docker build .
