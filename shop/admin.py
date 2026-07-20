@@ -1,4 +1,4 @@
-# Django admin registrations and inlines for shop models with inventory and plan guards
+"""Django admin registrations and inlines for shop models with inventory and plan guards"""
 from django import forms
 from django.contrib import admin
 
@@ -49,6 +49,7 @@ from .models import (
     Subscription,
     TaxRate,
     Tenant,
+    TenantCustomerProfile,
     TenantMembership,
     WebhookDelivery,
     WebhookEndpoint,
@@ -241,6 +242,8 @@ class AuditLogAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
 admin.site.register(SimulatedGatewayIntent)
 admin.site.register(AccountProfile)
 admin.site.register(Address)
@@ -261,6 +264,7 @@ admin.site.register(CustomerGroup)
 admin.site.register(PriceListEntry)
 admin.site.register(CustomerSubscription)
 admin.site.register(TenantMembership)
+admin.site.register(TenantCustomerProfile)
 admin.site.register(Invoice)
 admin.site.register(EmailSuppression)
 
