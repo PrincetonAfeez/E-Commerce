@@ -1,4 +1,4 @@
-# Tests audit fixes: reservation expiry, idempotency locks, rate limits, and price drift
+"""Tests audit fixes: reservation expiry, idempotency locks, rate limits, and price drift"""
 from __future__ import annotations
 
 import uuid
@@ -64,18 +64,14 @@ def test_reconcile_releases_abandoned_authorization():
     authorize_payment(attempt, idempotency_key="auth-abandon-pay")  # approve -> intent authorized
     attempt.refresh_from_db()
     assert attempt.status == CheckoutAttempt.Status.PAYMENT_PENDING
-    CheckoutAttempt.objects.filter(pk=attempt.pk).update(
-        payment_started_at=timezone.now() - timedelta(hours=2)
-    )
+    CheckoutAttempt.objects.filter(pk=attempt.pk).update(payment_started_at=timezone.now() - timedelta(hours=2))
 
     resolved = reconcile_stranded_payments(abandon_authorized_after=timedelta(hours=1))
 
     attempt.refresh_from_db()
     assert resolved == 1
     assert attempt.status == CheckoutAttempt.Status.FAILED
-    assert Reservation.objects.filter(
-        checkout_attempt=attempt, status=Reservation.Status.ACTIVE
-    ).count() == 0
+    assert Reservation.objects.filter(checkout_attempt=attempt, status=Reservation.Status.ACTIVE).count() == 0
 
 
 # --- #4: idempotency lock reclaim / in-progress semantics ---
@@ -87,9 +83,7 @@ def test_idempotency_live_lock_returns_in_progress():
 
 def test_idempotency_expired_lock_is_reclaimed():
     record = idempotency.begin("scope-b", "k2", session_key="s")
-    IdempotencyRecord.objects.filter(pk=record.pk).update(
-        locked_until=timezone.now() - timedelta(minutes=1)
-    )
+    IdempotencyRecord.objects.filter(pk=record.pk).update(locked_until=timezone.now() - timedelta(minutes=1))
     reclaimed = idempotency.begin("scope-b", "k2", session_key="s")
     assert reclaimed.pk == record.pk
     assert reclaimed.status == IdempotencyRecord.Status.IN_PROGRESS
@@ -118,9 +112,7 @@ def test_cancel_paid_order_refunds_and_restocks():
     assert order.refund_total == order.total  # money returned
     assert variant.quantity == 5  # restocked
     assert order.payments.first().status == Payment.Status.REFUNDED
-    assert OutboxEvent.objects.filter(
-        event_type="order.cancelled_email", aggregate_id=str(order.pk)
-    ).exists()
+    assert OutboxEvent.objects.filter(event_type="order.cancelled_email", aggregate_id=str(order.pk)).exists()
 
 
 # --- #3: delivered + failed-payment notifications are queued ---
@@ -129,9 +121,7 @@ def test_delivered_transition_queues_email():
     transition_fulfillment(order, target_status=Fulfillment.Status.PROCESSING)
     transition_fulfillment(order, target_status=Fulfillment.Status.SHIPPED)
     transition_fulfillment(order, target_status=Fulfillment.Status.DELIVERED)
-    assert OutboxEvent.objects.filter(
-        event_type="order.delivered_email", aggregate_id=str(order.pk)
-    ).exists()
+    assert OutboxEvent.objects.filter(event_type="order.delivered_email", aggregate_id=str(order.pk)).exists()
 
 
 def test_failed_payment_queues_email():
@@ -139,9 +129,7 @@ def test_failed_payment_queues_email():
     cart = make_cart(variant)
     attempt = begin_checkout(cart, idempotency_key="pf")
     authorize_payment(attempt, idempotency_key="pf-pay", card_token="tok_decline")
-    assert OutboxEvent.objects.filter(
-        event_type="payment.failed_email", aggregate_id=str(attempt.pk)
-    ).exists()
+    assert OutboxEvent.objects.filter(event_type="payment.failed_email", aggregate_id=str(attempt.pk)).exists()
 
 
 # --- #1 (R4): a cancelled order cannot be fulfilled ---
@@ -270,8 +258,15 @@ def test_api_begin_checkout_idempotency_replay(client):
 
     url = reverse("api-checkout-attempts")
     headers = {"HTTP_IDEMPOTENCY_KEY": "api-idem-1"}
-    first = client.post(url, {"shipping_method": "Standard"}, content_type="application/json", **headers)
-    second = client.post(url, {"shipping_method": "Standard"}, content_type="application/json", **headers)
+    payload = {
+        "shipping_method": "Standard",
+        "email": "guest@example.com",
+        "address1": "1 Main St",
+        "city": "Springfield",
+        "postal_code": "12345",
+    }
+    first = client.post(url, payload, content_type="application/json", **headers)
+    second = client.post(url, payload, content_type="application/json", **headers)
 
     assert first.status_code == 201
     assert first.json()["id"] == second.json()["id"]

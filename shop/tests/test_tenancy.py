@@ -1,4 +1,4 @@
-# Tests multi-tenant isolation, staff scoping, signup, billing, and cross-store access
+"""Tests multi-tenant isolation, staff scoping, signup, billing, and cross-store access"""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -124,9 +124,7 @@ def test_webhook_events_do_not_cross_tenants():
     ep_b = WebhookEndpoint.objects.create(url="https://b.test/hook", secret="k")
 
     set_current_tenant(a)
-    event = OutboxEvent.objects.create(
-        event_type="order.confirmation_email", aggregate_type="Order", aggregate_id="1"
-    )
+    event = OutboxEvent.objects.create(event_type="order.confirmation_email", aggregate_type="Order", aggregate_id="1")
     clear_current_tenant()  # simulate the job running with no context
 
     created = enqueue_deliveries(event)
@@ -224,9 +222,7 @@ def test_self_serve_signup_creates_store(client, settings, django_user_model):
     assert resp.status_code == 200
     tenant = Tenant.objects.get(slug="acme")
     owner = django_user_model.objects.get(username="o@acme.test")
-    assert TenantMembership.objects.filter(
-        tenant=tenant, user=owner, role=TenantMembership.Role.OWNER
-    ).exists()
+    assert TenantMembership.objects.filter(tenant=tenant, user=owner, role=TenantMembership.Role.OWNER).exists()
     set_current_tenant(tenant)
     sub = Subscription.get_solo()
     assert sub.plan.slug == "starter"
@@ -242,9 +238,7 @@ def test_team_invite_adds_membership(client, settings, django_user_model):
     TenantMembership.objects.create(tenant=a, user=owner, role=TenantMembership.Role.OWNER)
     client.force_login(owner)
 
-    client.post(
-        "/staff/team/invite/", {"email": "new@a.test", "role": "staff"}, HTTP_HOST="a.example.com"
-    )
+    client.post("/staff/team/invite/", {"email": "new@a.test", "role": "staff"}, HTTP_HOST="a.example.com")
     new_user = django_user_model.objects.get(username="new@a.test")
     assert TenantMembership.objects.filter(tenant=a, user=new_user).exists()
 

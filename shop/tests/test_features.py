@@ -1,4 +1,4 @@
-# Tests storefront features: email, webhooks, credit, SEO, B2B pricing, and subscriptions
+"""Tests storefront features: email, webhooks, credit, SEO, B2B pricing, and subscriptions"""
 from __future__ import annotations
 
 import uuid
@@ -40,6 +40,7 @@ from shop.services.refunds import create_refund
 from shop.services.returns import approve_return, request_return
 from shop.services.search import search_products
 
+from .conftest import ensure_verified_profile
 from .test_checkout_seam import make_cart, make_variant
 
 pytestmark = pytest.mark.django_db
@@ -51,6 +52,7 @@ def _order(idem="f", *, email="buyer@example.com", user=None):
     if user is not None:
         cart.user = user
         cart.save(update_fields=["user"])
+        ensure_verified_profile(user)
     attempt = begin_checkout(cart, idempotency_key=f"co-{idem}", contact={"email": email})
     payment = authorize_payment(attempt, idempotency_key=f"pay-{idem}")
     return confirm_payment(payment, idempotency_key=f"cf-{idem}"), variant
@@ -62,9 +64,7 @@ def test_process_outbox_actually_sends_order_email():
     assert OutboxEvent.objects.filter(event_type="order.confirmation_email").exists()
     call_command("process_outbox")
     assert any("confirmed" in m.subject.lower() for m in mail.outbox)
-    assert EmailDelivery.objects.filter(
-        template="order.confirmation_email", status=EmailDelivery.Status.SENT
-    ).exists()
+    assert EmailDelivery.objects.filter(template="order.confirmation_email", status=EmailDelivery.Status.SENT).exists()
 
 
 def test_shipped_email_sent_on_transition():
@@ -90,9 +90,7 @@ def test_abandoned_cart_recovery_queues_email(django_user_model):
 
     cart.refresh_from_db()
     assert cart.recovery_sent_at is not None
-    assert OutboxEvent.objects.filter(
-        event_type="cart.recovery_email", aggregate_id=str(cart.pk)
-    ).exists()
+    assert OutboxEvent.objects.filter(event_type="cart.recovery_email", aggregate_id=str(cart.pk)).exists()
     # Idempotent: a second run does not re-queue.
     call_command("recover_abandoned_carts", "--older-than-minutes", "60")
     assert OutboxEvent.objects.filter(event_type="cart.recovery_email").count() == 1
@@ -197,9 +195,7 @@ def test_return_request_and_approval_refunds_and_restocks(django_user_model):
 
 # --- Outbound webhooks ---
 def test_webhook_delivery_signs_and_sends(monkeypatch):
-    endpoint = WebhookEndpoint.objects.create(
-        url="https://example.test/hook", secret="s3cr3t", event_types=[]
-    )
+    endpoint = WebhookEndpoint.objects.create(url="https://example.test/hook", secret="s3cr3t", event_types=[])
     event = OutboxEvent.objects.create(
         event_type="order.confirmation_email",
         aggregate_type="Order",
@@ -270,6 +266,7 @@ def test_search_finds_product_by_name():
 
 # --- Gift cards & store credit ---
 def _credit_cart(user, *, price="20.00", qty=1):
+    ensure_verified_profile(user)
     variant = make_variant(quantity=5, price=price)
     cart = make_cart(variant, quantity=qty)
     cart.user = user
@@ -481,27 +478,28 @@ def test_also_bought_recommendations():
 
 # --- Tier 1: B2B group pricing ---
 def test_b2b_group_pricing(django_user_model):
-    from shop.models import AccountProfile, CustomerGroup, PriceListEntry
+    from shop.models import CustomerGroup, PriceListEntry, TenantCustomerProfile
     from shop.services.pricing import effective_price
 
     user = django_user_model.objects.create_user(username=f"u{uuid.uuid4().hex[:6]}", password="x")
     variant = make_variant(price="100.00")
     group = CustomerGroup.objects.create(name="Wholesale", percent_off=Decimal("20.00"))
-    AccountProfile.objects.create(user=user, customer_group=group)
+    TenantCustomerProfile.objects.create(user=user, customer_group=group)
 
-    assert effective_price(variant, user) == Decimal("80.00")          # % off
+    assert effective_price(variant, user) == Decimal("80.00")  # % off
     PriceListEntry.objects.create(group=group, variant=variant, price=Decimal("70.00"))
-    assert effective_price(variant, user) == Decimal("70.00")          # entry overrides
-    assert effective_price(variant, None) == Decimal("100.00")         # anon -> base
+    assert effective_price(variant, user) == Decimal("70.00")  # entry overrides
+    assert effective_price(variant, None) == Decimal("100.00")  # anon -> base
 
 
 def test_b2b_pricing_flows_into_checkout(django_user_model):
-    from shop.models import AccountProfile, CustomerGroup
+    from shop.models import CustomerGroup, TenantCustomerProfile
 
     user = django_user_model.objects.create_user(username=f"u{uuid.uuid4().hex[:6]}", password="x")
     variant = make_variant(quantity=5, price="100.00")
     group = CustomerGroup.objects.create(name="Wholesale", percent_off=Decimal("25.00"))
-    AccountProfile.objects.create(user=user, customer_group=group)
+    TenantCustomerProfile.objects.create(user=user, customer_group=group)
+    ensure_verified_profile(user)
     cart = make_cart(variant, quantity=1)
     cart.user = user
     cart.save(update_fields=["user"])
@@ -518,6 +516,7 @@ def test_subscription_created_and_renewed(django_user_model):
     from shop.services.subscriptions import generate_due_renewals
 
     user = django_user_model.objects.create_user(username=f"u{uuid.uuid4().hex[:6]}", password="x")
+    ensure_verified_profile(user)
     variant = make_variant(quantity=10, price="20.00")
     variant.subscription_interval = "monthly"
     variant.save()
@@ -532,9 +531,7 @@ def test_subscription_created_and_renewed(django_user_model):
     assert sub.status == CustomerSubscription.Status.ACTIVE
 
     orders_before = Order.objects.count()
-    CustomerSubscription.objects.filter(pk=sub.pk).update(
-        next_renewal_at=timezone.now() - timedelta(days=1)
-    )
+    CustomerSubscription.objects.filter(pk=sub.pk).update(next_renewal_at=timezone.now() - timedelta(days=1))
     assert generate_due_renewals() == 1
     assert Order.objects.count() == orders_before + 1  # a renewal order was created
     sub.refresh_from_db()
@@ -545,9 +542,7 @@ def test_subscription_created_and_renewed(django_user_model):
 
 # --- Privacy: data export + account deletion ---
 def test_account_data_export(client, django_user_model):
-    user = django_user_model.objects.create_user(
-        username=f"u{uuid.uuid4().hex[:6]}", email="e@x.test", password="x"
-    )
+    user = django_user_model.objects.create_user(username=f"u{uuid.uuid4().hex[:6]}", email="e@x.test", password="x")
     order, _ = _order("export", user=user)
     client.force_login(user)
     resp = client.get(reverse("account:data_export"))
@@ -557,17 +552,19 @@ def test_account_data_export(client, django_user_model):
 
     data = json.loads(resp.content)
     assert data["account"]["email"] == "e@x.test"
-    assert any(o["order_number"] == order.order_number for o in data["orders"])
+    assert "tenants" in data
+    tenant_orders = []
+    for block in data["tenants"]:
+        tenant_orders.extend(block["orders"])
+    assert any(o["order_number"] == order.order_number for o in tenant_orders)
 
 
 def test_account_deletion_scrubs_pii_keeps_order(client, django_user_model):
-    user = django_user_model.objects.create_user(
-        username=f"u{uuid.uuid4().hex[:6]}", email="e@x.test", password="x"
-    )
+    user = django_user_model.objects.create_user(username=f"u{uuid.uuid4().hex[:6]}", email="e@x.test", password="x")
     order, _ = _order("del", user=user, email="buyer@x.test")
     order_number = order.order_number
     client.force_login(user)
-    resp = client.post(reverse("account:delete"))
+    resp = client.post(reverse("account:delete"), {"password": "x"})
     assert resp.status_code == 302
     assert not django_user_model.objects.filter(pk=user.pk).exists()
     order.refresh_from_db()

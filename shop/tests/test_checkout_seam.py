@@ -1,4 +1,4 @@
-# Tests checkout seam: payment finalize, stock, coupons, refunds, and reconciliation
+"""Tests checkout seam: payment finalize, stock, coupons, refunds, and reconciliation"""
 from __future__ import annotations
 
 import uuid
