@@ -1,6 +1,6 @@
 # Runtime dependencies (Python 3.12; see Dockerfile)
 Django>=5.2,<6.0
-djangorestframework>=3.17,<4.0
+djangorestframework>=3.17.1,<4.0
 drf-spectacular>=0.27,<1.0
 drf-spectacular-sidecar>=2024.7.1,<2027.0
 dj-database-url>=2.2,<4.0
