@@ -1,4 +1,4 @@
-# Image upload validator enforcing allowed extensions and max file size
+"""Image upload validator enforcing allowed extensions and max file size"""
 from __future__ import annotations
 
 import os
@@ -17,9 +17,7 @@ def validate_image_upload(file) -> None:
     """
     max_size = getattr(settings, "MAX_UPLOAD_SIZE_BYTES", 5 * 1024 * 1024)
     if file.size and file.size > max_size:
-        raise ValidationError(
-            f"Image is too large ({file.size} bytes). Maximum allowed is {max_size} bytes."
-        )
+        raise ValidationError(f"Image is too large ({file.size} bytes). Maximum allowed is {max_size} bytes.")
     ext = os.path.splitext(file.name)[1].lower()
     if ext not in ALLOWED_IMAGE_EXTENSIONS:
         allowed = ", ".join(sorted(ALLOWED_IMAGE_EXTENSIONS))
