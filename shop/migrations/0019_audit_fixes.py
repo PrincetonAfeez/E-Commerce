@@ -1,4 +1,4 @@
-# Schema audit fixes: tenant scoping, constraints, TenantCustomerProfile, and backfills
+"""Schema audit fixes: tenant scoping, constraints, TenantCustomerProfile, and backfills"""
 from __future__ import annotations
 
 import django.db.models.deletion

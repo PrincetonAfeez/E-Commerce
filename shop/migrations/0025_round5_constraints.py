@@ -1,4 +1,4 @@
-# Round 5: one pending payment per checkout attempt (SVC5-002)
+"""Round 5: one pending payment per checkout attempt (SVC5-002)"""
 import logging
 
 from django.db import migrations, models

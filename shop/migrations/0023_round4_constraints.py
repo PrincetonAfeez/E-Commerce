@@ -1,4 +1,4 @@
-# Round 4 schema constraints, indexes, and optional tenant FKs on audit/email models
+"""Round 4 schema constraints, indexes, and optional tenant FKs on audit/email models"""
 from django.db import migrations, models
 import django.db.models.deletion
 

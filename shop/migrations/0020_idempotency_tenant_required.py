@@ -1,4 +1,4 @@
-# Data migration: enforce non-null IdempotencyRecord.tenant
+"""Data migration: enforce non-null IdempotencyRecord.tenant"""
 from django.db import migrations, models
 import django.db.models.deletion
 

@@ -1,4 +1,4 @@
-# Round 3 schema constraints and indexes
+"""Round 3 schema constraints and indexes"""
 from django.db import migrations, models
 
 

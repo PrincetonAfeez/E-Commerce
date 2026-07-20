@@ -1,4 +1,4 @@
-# Round 3 follow-up: tenant FKs on ledger models, remove dual Order↔Attempt link, constraints
+"""Round 3 follow-up: tenant FKs on ledger models, remove dual Order↔Attempt link, constraints"""
 from django.db import migrations, models
 import django.db.models.deletion
 
