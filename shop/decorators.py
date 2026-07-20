@@ -1,4 +1,4 @@
-# tenant_staff_required decorator restricting views to current-tenant staff or superusers
+"""tenant_staff_required decorator restricting views to current-tenant staff or superusers"""
 from __future__ import annotations
 
 import functools
@@ -25,11 +25,7 @@ def tenant_staff_required(view=None, *, roles=None):
             from .models import TenantMembership
 
             tenant = getattr(request, "tenant", None)
-            membership = (
-                TenantMembership.objects.filter(user=user, tenant=tenant).first()
-                if tenant
-                else None
-            )
+            membership = TenantMembership.objects.filter(user=user, tenant=tenant).first() if tenant else None
             if membership and (roles is None or membership.role in roles):
                 request.tenant_role = membership.role
                 return func(request, *args, **kwargs)
