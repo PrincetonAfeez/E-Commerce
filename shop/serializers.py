@@ -1,5 +1,7 @@
-# DRF serializers exposing catalog, cart, checkout, and order API representations
+"""DRF serializers exposing catalog, cart, checkout, and order API representations"""
 from __future__ import annotations
+
+from decimal import Decimal
 
 from rest_framework import serializers
 
@@ -13,6 +15,7 @@ except ImportError:  # schema generation is optional
 
         return decorator
 
+
 from .models import (
     Cart,
     CartItem,
@@ -22,6 +25,7 @@ from .models import (
     Fulfillment,
     Order,
     OrderItem,
+    Payment,
     Product,
     ProductImage,
     ProductVariant,
@@ -52,6 +56,7 @@ class ProductVariantSerializer(serializers.ModelSerializer):
     display_name = serializers.SerializerMethodField()
     on_sale = serializers.BooleanField(read_only=True)
     discount_percent = serializers.IntegerField(read_only=True)
+    is_subscription = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = ProductVariant
@@ -67,6 +72,8 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             "discount_percent",
             "currency",
             "available_to_sell",
+            "subscription_interval",
+            "is_subscription",
             "active",
         ]
 
@@ -155,8 +162,18 @@ class CouponActionSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=60)
 
 
+class GuestOrderLookupSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    order_number = serializers.CharField(max_length=40)
+
+
+class GuestOrderLookupResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+
+
 class CheckoutAttemptSerializer(serializers.ModelSerializer):
     reservations = serializers.SerializerMethodField()
+    order_id = serializers.SerializerMethodField()
 
     class Meta:
         model = CheckoutAttempt
@@ -170,6 +187,7 @@ class CheckoutAttemptSerializer(serializers.ModelSerializer):
             "shipping_total",
             "tax_total",
             "total",
+            "credit_applied",
             "currency",
             "gateway_reference",
             "expires_at",
@@ -177,6 +195,12 @@ class CheckoutAttemptSerializer(serializers.ModelSerializer):
             "price_drift_message",
             "reservations",
         ]
+
+    def get_order_id(self, obj):
+        try:
+            return obj.order_record.pk
+        except Order.DoesNotExist:
+            return None
 
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
     def get_reservations(self, obj):
@@ -188,24 +212,62 @@ class CheckoutAttemptSerializer(serializers.ModelSerializer):
 
 class BeginCheckoutSerializer(serializers.Serializer):
     email = serializers.EmailField(required=False, allow_blank=True)
-    name = serializers.CharField(required=False, allow_blank=True)
+    name = serializers.CharField(required=False, allow_blank=True, max_length=180)
     shipping_method = serializers.ChoiceField(choices=["Standard", "Express"], default="Standard")
-    address1 = serializers.CharField(required=False, allow_blank=True)
-    address2 = serializers.CharField(required=False, allow_blank=True)
-    city = serializers.CharField(required=False, allow_blank=True)
-    region = serializers.CharField(required=False, allow_blank=True)
-    postal_code = serializers.CharField(required=False, allow_blank=True)
+    address1 = serializers.CharField(required=True, max_length=180)
+    address2 = serializers.CharField(required=False, allow_blank=True, max_length=180)
+    city = serializers.CharField(required=True, max_length=120)
+    region = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    postal_code = serializers.CharField(required=True, max_length=32)
     country = serializers.CharField(default="US", min_length=2, max_length=2)
-    expected_subtotal = serializers.DecimalField(
-        max_digits=12, decimal_places=2, required=False, allow_null=True
-    )
+    expected_subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
     use_store_credit = serializers.BooleanField(default=False)
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        if request is not None and not request.user.is_authenticated:
+            email = (attrs.get("email") or "").strip()
+            if not email:
+                raise serializers.ValidationError({"email": "Email is required for guest checkout."})
+        return attrs
 
 
 class ConfirmPaymentSerializer(serializers.Serializer):
     card_token = serializers.CharField(default="tok_visa")
-    authorize_mode = serializers.CharField(default="approve")
-    confirm_mode = serializers.CharField(default="approve")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from django.conf import settings
+
+        if settings.GATEWAY_TEST_MODES_ENABLED:
+            self.fields["authorize_mode"] = serializers.ChoiceField(
+                choices=["approve", "decline", "dropped_confirmation"],
+                default="approve",
+            )
+            self.fields["confirm_mode"] = serializers.ChoiceField(
+                choices=["approve", "decline"],
+                default="approve",
+            )
+
+
+class AuthorizePaymentSerializer(ConfirmPaymentSerializer):
+    """Authorize-only step for async PSP flows (confirm via webhook or poll)."""
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Payment
+        fields = [
+            "id",
+            "status",
+            "amount",
+            "currency",
+            "gateway_reference",
+            "provider",
+            "safe_display",
+            "failure_code",
+        ]
+        read_only_fields = fields
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
@@ -242,7 +304,6 @@ class OrderSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "order_number",
-            "order_token",
             "status",
             "lifecycle",
             "guest_email",
@@ -251,6 +312,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "shipping_total",
             "tax_total",
             "total",
+            "credit_applied",
             "refund_total",
             "currency",
             "selected_shipping_method",
@@ -258,6 +320,11 @@ class OrderSerializer(serializers.ModelSerializer):
             "items",
             "fulfillment",
         ]
+
+
+class GuestOrderSerializer(OrderSerializer):
+    class Meta(OrderSerializer.Meta):
+        fields = OrderSerializer.Meta.fields + ["order_token"]
 
 
 class StaffTransitionSerializer(serializers.Serializer):
@@ -268,13 +335,29 @@ class StaffTransitionSerializer(serializers.Serializer):
             Fulfillment.Status.DELIVERED,
         ]
     )
-    carrier = serializers.CharField(required=False, allow_blank=True)
-    tracking_number = serializers.CharField(required=False, allow_blank=True)
-    note = serializers.CharField(required=False, allow_blank=True)
+    carrier = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    tracking_number = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class RefundResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    status = serializers.CharField()
+    amount = serializers.CharField()
+
+
+class StaffCancelSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+    restock = serializers.BooleanField(required=False, default=False)
+
+
+class InventoryAdjustmentResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    quantity_delta = serializers.IntegerField()
 
 
 class RefundSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
     restock = serializers.BooleanField(default=False)
     reason = serializers.CharField(required=False, allow_blank=True)
 
