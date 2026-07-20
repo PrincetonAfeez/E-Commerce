@@ -12,6 +12,9 @@ knows how to route once the request arrives.
 2. The merchant points that hostname at your load balancer / proxy via DNS
    (`CNAME` to your platform host, or `A`/`AAAA` records).
 3. Add the domain to `DJANGO_ALLOWED_HOSTS` (or use a wildcard/subdomain policy).
+4. Ensure the domain is trusted for HTTPS POST: add it to `DJANGO_CSRF_TRUSTED_ORIGINS`
+   (e.g. `https://shop.acme.com`) or rely on startup extension from active tenant
+   `primary_domain` values (see `shop/csrf_origins.py`).
 
 ## 2. Automatic per-tenant certificates (Caddy)
 
@@ -53,5 +56,5 @@ on-demand certificate issuance.
 ## Notes
 
 - `/internal/tls-check/` should not be exposed publicly on the storefront domains; scope
-  it to the proxy network, or gate it by source IP at the proxy.
+  it to the proxy network, gate it with `TLS_CHECK_SECRET`, or restrict by source IP at the proxy.
 - The default tenant handles the platform's own apex domain and any unmatched host.
